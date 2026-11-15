@@ -167,18 +167,20 @@ struct RootView: View {
     var body: some View {
         let inPlayer = model.tab == .player
         let showsNavigation = !inPlayer || !fullscreen || fullscreenHeader
-        Group {
-            switch model.tab {
-            case .home: HomeView(model: model)
-            case .library: LibraryView(model: model)
-            case .player:
-                Stage(model: model, player: model.player, fullscreen: fullscreen,
-                      navigationClearance: showsNavigation ? navigationHeight : 0)
-            case .downloads: DownloadView(model: model)
+        ZStack(alignment: .top) {
+            Group {
+                switch model.tab {
+                case .home: HomeView(model: model)
+                case .library: LibraryView(model: model)
+                case .player:
+                    Stage(model: model, player: model.player, fullscreen: fullscreen,
+                          navigationClearance: showsNavigation ? navigationHeight : 0)
+                case .downloads: DownloadView(model: model)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.top, inPlayer ? 0 : navigationHeight)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.top, inPlayer ? 0 : navigationHeight)
         .overlay(alignment: .top) {
             if showsNavigation {
                 header
