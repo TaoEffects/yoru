@@ -2,6 +2,7 @@ import SwiftUI
 
 struct TorrentFilePicker: View {
     @Environment(\.yoruTheme) private var theme
+    @Environment(\.yoruLabels) private var labels
     let files: [TorrentFile]
     @Binding var selection: Set<Int>
     var locked: Bool
@@ -71,10 +72,14 @@ struct TorrentFilePicker: View {
                 .foregroundStyle(selected ? theme.accent : theme.mutedText)
                 .frame(width: 26)
                 .accessibilityHidden(true)
-            Text(filename)
-                .font(.system(size: 14, weight: .semibold))
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 3) {
+                if file.isVideo, let episode = file.episode {
+                    Text(labels("Épisode \(episode)")).font(YoruTypography.display(20))
+                }
+                Text(filename)
+                    .font(YoruTypography.text(15)).lineLimit(2)
+                    .foregroundStyle(file.episode == nil ? theme.primary : theme.mutedText)
+            }.frame(maxWidth: .infinity, alignment: .leading)
             Text(ByteCountFormatter.string(fromByteCount: file.bytes, countStyle: .file))
                 .font(.system(size: 13, weight: .medium).monospacedDigit())
                 .foregroundStyle(theme.mutedText)

@@ -107,7 +107,17 @@ struct LocalState: Codable {
     var transferSeasons: [String: String]?
     var importedRatings: [String: Double] = [:]
     var nautiljonSeen: Set<String>?
+    var nautiljonWatchlist: [NautiljonTitle]?
     var localSkips: [String: [SavedSegment]] = [:]
+}
+
+struct NautiljonTitle: Codable {
+    var titles: [String]
+    var date: String
+    var priority: Int
+    var rating: Double?
+    var status: String
+    var keys: Set<String> { Set(titles.map(\.normalized).filter { !$0.isEmpty }) }
 }
 
 struct SavedSegment: Codable {
@@ -146,14 +156,18 @@ enum Indexer {
             let directorySeason = containers.compactMap {
                 SeasonNumber.first(in: $0)
             }.last
-            let label = showFolder?.title.replacingPattern(#"(?i)\s+(?:S|season\s+|saison\s+)\d{1,2}$"#) ?? info.title
-            let alias = containers.first == "Yoru" && containers.count >= 2 ? downloadFolders[containers[1]] : nil
+            let downloadedShow = containers.first == "Yoru" && containers.count >= 2 ? containers[1] : nil
+            let quickFolder = downloadedShow.flatMap { _ in containers.count >= 3 && containers[2].hasPrefix("Saison ")
+                && SeasonNumber.first(in: containers[2]) != nil ? downloadedShow : nil }
+            let label = showFolder?.title.replacingPattern(#"(?i)\s+(?:S|season\s+|saison\s+)\d{1,2}$"#) ?? quickFolder ?? info.title
+            let alias = downloadedShow.flatMap { downloadFolders[$0] }
             let id = alias ?? label.normalized.nonEmpty ?? url.path
-            let display = info.title.nonEmpty ?? label
             let number = info.episode ?? (containers.isEmpty ? nil : url.deletingPathExtension().lastPathComponent.match(#"^\s*(\d{1,4})\s*$"#).flatMap { Int($0[1]) })
-            let episode = Episode(url: url, title: display, showID: id, season: info.season ?? directorySeason ?? showFolder?.season, number: number)
+            let display = number != nil && Int(info.title) != nil ? label : info.title.nonEmpty ?? label
+            let quickSeason = quickFolder == nil ? nil : SeasonNumber.first(in: containers[2])
+            let episode = Episode(url: url, title: display, showID: id, season: quickSeason ?? info.season ?? directorySeason ?? showFolder?.season, number: number)
             if entries[id] == nil {
-                entries[id] = Series(id: id, title: label, query: info.episode == nil ? label : display, episodes: [], downloadOnly: containers.first == "Yoru")
+                entries[id] = Series(id: id, title: label, query: quickFolder ?? (info.episode == nil ? label : display), episodes: [], downloadOnly: containers.first == "Yoru")
             } else if containers.first != "Yoru", entries[id]?.downloadOnly == true {
                 entries[id]?.title = label
                 entries[id]?.query = info.episode == nil ? label : display
@@ -172,29 +186,58 @@ enum Indexer {
         }.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
     }
 
-    static func nautiljon(_ url: URL) throws -> (ratings: [String: Double], titles: Set<String>) {
+    static func nautiljon(_ url: URL) throws -> [NautiljonTitle] {
         let csv = try String(contentsOf: url, encoding: .utf8).replacingOccurrences(of: "\u{FEFF}", with: "")
-        let lines = csv.split(whereSeparator: \.isNewline)
-        let headings = lines.first?.split(separator: ";").map { String($0).normalized } ?? []
+        let rows = csvRows(csv)
+        let headings = rows.first?.map(\.normalized) ?? []
         guard let titleIndex = headings.firstIndex(of: "titre") else { throw Notice("La colonne Titre manque dans l’export Nautiljon.") }
-        let noteIndex = headings.firstIndex(of: "note")
-        var values: [String: Double] = [:]
-        var titles: Set<String> = []
-        for line in lines.dropFirst() {
-            let fields = line.split(separator: ";", omittingEmptySubsequences: false)
-            guard fields.indices.contains(titleIndex) else { continue }
-            // Some exports do not quote semicolons inside titles.
-            let end = noteIndex == headings.count - 1 && fields.count >= headings.count ? fields.count - 1 : titleIndex + 1
-            let name = fields[titleIndex..<max(titleIndex + 1, end)].joined(separator: ";").normalized
-            guard !name.isEmpty else { continue }
-            titles.insert(name)
-            if let noteIndex {
-                let index = noteIndex == headings.count - 1 ? fields.count - 1 : noteIndex
-                guard fields.indices.contains(index), let score = Double(String(fields[index]).trimmed.replacingOccurrences(of: ",", with: ".")),
-                      (0...10).contains(score) else { continue }
-                values[name] = score
+        let noteIndex = headings.firstIndex(of: "manote") ?? headings.firstIndex(of: "note")
+        return rows.dropFirst().compactMap { fields in
+            func cell(_ column: String) -> String {
+                guard let index = headings.firstIndex(of: column), fields.indices.contains(index) else { return "" }
+                return fields[index].trimmed
             }
+            guard fields.indices.contains(titleIndex) else { return nil }
+            // Older three-column exports sometimes leave semicolons in titles unquoted.
+            let legacy = headings == ["annee", "titre", "note"]
+            let title = legacy && fields.count >= 3 ? fields[titleIndex..<(fields.count - 1)].joined(separator: ";") : fields[titleIndex]
+            let titles = [title.trimmed, cell("titrealternatif"), cell("titreoriginal")].filter { !$0.isEmpty }
+            guard !titles.isEmpty else { return nil }
+            let rating = (legacy ? fields.indices.last : noteIndex).flatMap { index in
+                fields.indices.contains(index) ? Double(fields[index].trimmed.replacingOccurrences(of: ",", with: ".")) : nil
+            }.flatMap { (0...10).contains($0) ? $0 : nil }
+            let date = cell("datedajout").split(separator: "/").reversed().map {
+                $0.count == 1 ? "0" + $0 : String($0)
+            }.joined()
+            return NautiljonTitle(titles: titles, date: date, priority: Int(cell("priorite")) ?? 0,
+                                  rating: rating, status: cell("statut").normalized)
         }
-        return (values, titles)
+    }
+
+    private static func csvRows(_ csv: String) -> [[String]] {
+        var rows: [[String]] = []
+        var row: [String] = []
+        var value = ""
+        var quoted = false
+        var characters = csv.makeIterator()
+        var next = characters.next()
+        while let character = next {
+            next = characters.next()
+            if character == "\"" && (quoted || value.isEmpty) {
+                if quoted, next == "\"" {
+                    value.append(character)
+                    next = characters.next()
+                } else { quoted.toggle() }
+            } else if !quoted, character == ";" {
+                row.append(value)
+                value = ""
+            } else if !quoted, character.isNewline {
+                if !row.isEmpty || !value.isEmpty { rows.append(row + [value]) }
+                row = []
+                value = ""
+            } else { value.append(character) }
+        }
+        if !row.isEmpty || !value.isEmpty { rows.append(row + [value]) }
+        return rows
     }
 }

@@ -12,7 +12,7 @@ actor ArtworkCatalog {
     static let shared = ArtworkCatalog()
     private var cache: [String: Anime] = [:]
     private var absent: Set<String> = []
-    private var pending: [String: Task<Anime?, Never>] = [:]
+    private var pending: [String: Task<(Anime?, Bool), Never>] = [:]
 
     func season(_ number: Int, title: String, id: Int? = nil) async -> Anime? {
         guard number > 1 else { return await match(title, id: id) }
@@ -39,24 +39,24 @@ actor ArtworkCatalog {
         guard !key.isEmpty else { return nil }
         if let cached = cache[key] { return cached }
         if absent.contains(key) { return nil }
-        if let task = pending[key] { return await task.value }
+        if let task = pending[key] { return await task.value.0 }
         let task = Task {
-            let firstPass = (try? await Catalog.lookup(title, id: id)) ?? []
-            if let id { return firstPass.first(where: { $0.id == id }) }
+            guard let firstPass = try? await Catalog.lookup(title, id: id) else { return (nil as Anime?, false) }
+            if let id { return (firstPass.first(where: { $0.id == id }), true) }
             func titles(_ item: Anime) -> [String] {
-                [item.title.romaji, item.title.english, item.title.native].compactMap { $0?.normalized }
+                Array(item.titleKeys)
             }
-            if let exact = firstPass.first(where: { titles($0).contains(key) }) { return exact }
+            if let exact = firstPass.first(where: { titles($0).contains(key) }) { return (exact, true) }
             let prefix = firstPass.filter { item in
                 key.count >= 8 && titles(item).contains { $0.hasPrefix(key) }
             }
-            return prefix.count == 1 ? prefix.first : nil
+            return (prefix.count == 1 ? prefix.first : nil, true)
         }
         pending[key] = task
-        let value = await task.value
+        let (value, completed) = await task.value
         pending[key] = nil
         if let value { cache[key] = value }
-        else { absent.insert(key) }
+        else if completed { absent.insert(key) }
         return value
     }
 }
@@ -221,12 +221,17 @@ struct ArtBackdrop: View {
     @Environment(\.yoruTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("lightweight") private var lightweight = false
+    @AppStorage("showArtworkBlur") private var showArtworkBlur = true
     var body: some View {
         GeometryReader { geometry in
             ZStack {
                 theme.background
                 RadialGradient(colors: [theme.glow.opacity(0.31), theme.background.opacity(0.97)], center: .topTrailing, startRadius: 20, endRadius: max(450, geometry.size.width * 0.84))
-                if let url, !lightweight {
+                if let glow = theme.secondaryGlow, !lightweight, showArtworkBlur {
+                    RadialGradient(colors: [glow.opacity(0.33), .clear], center: .bottomLeading,
+                                   startRadius: 26, endRadius: max(290, geometry.size.width * 0.65))
+                }
+                if let url, !lightweight, showArtworkBlur {
                     AsyncImage(url: url, transaction: Transaction(animation: reduceMotion ? nil : .easeInOut(duration: 0.26))) { phase in
                         if let image = phase.image {
                             image.resizable().scaledToFill()
@@ -235,11 +240,13 @@ struct ArtBackdrop: View {
                                 .transition(.opacity)
                         }
                     }.id(url)
-                    LinearGradient(colors: [theme.background.opacity(theme == .nuit ? 0.65 : 0.24), theme.background.opacity(0.88)],
+                    LinearGradient(colors: [theme.background.opacity(theme.colorScheme == .dark ? 0.65 : 0.24), theme.background.opacity(0.88)],
                                    startPoint: .topTrailing, endPoint: .bottomLeading)
                 }
             }.clipped()
-        }.allowsHitTesting(false).accessibilityHidden(true)
+        }
+        .animation(reduceMotion || lightweight ? nil : .easeOut(duration: 0.28), value: theme)
+        .allowsHitTesting(false).accessibilityHidden(true)
     }
 }
 

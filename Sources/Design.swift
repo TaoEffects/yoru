@@ -1,6 +1,32 @@
 import SwiftUI
 import CoreText
 
+enum PlayerTitleStyle: String, CaseIterable, Identifiable {
+    case wordmark, japanese
+    var id: Self { self }
+}
+
+struct InterfaceLabels {
+    var lowercase = false
+
+    func callAsFunction(_ label: String) -> String {
+        guard lowercase, let first = label.first, first.isUppercase,
+              label.dropFirst().first?.isUppercase != true else { return label }
+        return first.lowercased() + label.dropFirst()
+    }
+}
+
+private struct InterfaceLabelsKey: EnvironmentKey {
+    static let defaultValue = InterfaceLabels()
+}
+
+extension EnvironmentValues {
+    var yoruLabels: InterfaceLabels {
+        get { self[InterfaceLabelsKey.self] }
+        set { self[InterfaceLabelsKey.self] = newValue }
+    }
+}
+
 enum YoruTypography {
     static let registered: Bool = {
         var regular = false
@@ -39,6 +65,7 @@ enum YoruMotion {
 
 struct SearchField: View {
     @Environment(\.yoruTheme) private var theme
+    @Environment(\.yoruLabels) private var labels
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("lightweight") private var lightweight = false
     @FocusState private var focused: Bool
@@ -52,7 +79,7 @@ struct SearchField: View {
                 Image(systemName: icon).foregroundStyle(focused ? theme.accent : theme.mutedText)
                     .accessibilityHidden(true)
             }
-            TextField(title, text: $value, prompt: Text(title).foregroundColor(theme.mutedText))
+            TextField(labels(title), text: $value, prompt: Text(labels(title)).foregroundColor(theme.mutedText))
                 .textFieldStyle(.plain).focused($focused)
                 .font(YoruTypography.text(16, strong: true))
         }
@@ -68,6 +95,7 @@ struct SearchField: View {
 }
 
 struct SectionHeading: View {
+    @Environment(\.yoruLabels) private var labels
     @Environment(\.yoruTheme) private var theme
     let title: String
     var count: Int?
@@ -75,7 +103,7 @@ struct SectionHeading: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 11) {
-            Text(title).font(YoruTypography.display(compact ? 27 : 36))
+            Text(labels(title)).font(YoruTypography.display(compact ? 27 : 36))
                 .accessibilityAddTraits(.isHeader)
             if let count {
                 Text(count.formatted()).font(.caption.monospacedDigit()).foregroundStyle(theme.mutedText)

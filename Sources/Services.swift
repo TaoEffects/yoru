@@ -72,6 +72,7 @@ struct Anime: Decodable, Identifiable, Equatable {
     var idMal: Int?
     var format: String?
     var status: String?
+    var countryOfOrigin: String?
     var synonyms: [String]?
     var coverImage: Cover?
     var bannerImage: URL?
@@ -97,19 +98,21 @@ enum Catalog {
     }
 
     static func lookup(_ title: String, id: Int? = nil) async throws -> [Anime] {
-        let fields = "id idMal format status title { romaji english native } coverImage { large color } bannerImage episodes nextAiringEpisode { episode airingAt } relations { edges { relationType node { id title { romaji english native } type format status coverImage { large color } } } }"
+        let fields = "id idMal format status countryOfOrigin synonyms title { romaji english native } coverImage { large color } bannerImage episodes nextAiringEpisode { episode airingAt } relations { edges { relationType node { id title { romaji english native } type format status coverImage { large color } } } }"
         let query = id == nil
             ? "query($query: String!) { Page(perPage: 6) { media(search: $query, type: ANIME) { \(fields) } } }"
             : "query($id: Int!) { Media(id: $id, type: ANIME) { \(fields) } }"
         let variables: [String: Any] = id.map { ["id": $0] } ?? ["query": title]
         let body = try JSONSerialization.data(withJSONObject: ["query": query, "variables": variables])
         let response = try await HTTP.data(URL(string: "https://graphql.anilist.co")!, headers: ["Content-Type": "application/json"], body: body)
-        let result = try JSONDecoder().decode(Envelope.self, from: response).data
-        return result?.Page?.media ?? result?.Media.map { [$0] } ?? []
+        guard let result = try JSONDecoder().decode(Envelope.self, from: response).data else {
+            throw Notice("AniList n’a pas renvoyé de fiche lisible.")
+        }
+        return result.Page?.media ?? result.Media.map { [$0] } ?? []
     }
 
     static func discover(basedOn id: Int?) async throws -> [Anime] {
-        let fields = "id title { romaji english native } synonyms coverImage { large color } bannerImage"
+        let fields = "id format status episodes nextAiringEpisode { episode airingAt } title { romaji english native } synonyms coverImage { large color } bannerImage"
         let query: String
         let variables: [String: Any]
         if let id {

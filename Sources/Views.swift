@@ -6,23 +6,31 @@ struct Stage: View {
     @ObservedObject var player: Player
     var fullscreen: Bool
     let navigationClearance: CGFloat
+    @Binding var controls: Bool
     @State private var ending = IntroSession()
     @State private var nextCountdown: Int?
     @State private var subtitlePanel = false
     @State private var advanced = false
     @State private var queue = false
-    @State private var controls = true
     private final class Visibility { var lastActivity = 0.0 }
     @State private var visibility = Visibility()
     @State private var seekValue: Double?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.yoruLabels) private var labels
     @AppStorage("lightweight") private var lightweight = false
+    @AppStorage("playerTitleStyle") private var titleStyle: PlayerTitleStyle = .wordmark
+    @AppStorage("showSeekButtons") private var showSeekButtons = false
+    @AppStorage("seekButtonSeconds") private var seekButtonSeconds = 10
+    @AppStorage("playerControlsTimeout") private var controlsTimeout = 2
+    @AppStorage("autoAdvanceAtEnding") private var autoAdvanceAtEnding = true
+    @AppStorage("englishInSubtitleCycle") private var englishInSubtitleCycle = false
+    @AppStorage("introBehavior") private var introBehavior: IntroBehavior = .adaptive
 
     var body: some View {
         HStack(spacing: 0) {
             ZStack {
-                Color.black
-                VideoView(player: player).accessibilityHidden(true)
+                Color.black.ignoresSafeArea(.container, edges: .top)
+                VideoView(player: player).ignoresSafeArea(.container, edges: .top).accessibilityHidden(true)
                 if let episode = model.current {
                     Rectangle().fill(.clear).contentShape(Rectangle())
                         .gesture(TapGesture(count: 2).onEnded { NSApp.keyWindow?.toggleFullScreen(nil) }
@@ -30,35 +38,36 @@ struct Stage: View {
                     VStack(alignment: .leading) {
                         if controls || player.paused {
                             VStack(alignment: .leading, spacing: 5) {
-                                Text(episode.title).font(YoruTypography.display(27)).lineLimit(1)
-                                if episode.number != nil { Text(episode.display).font(.callout).foregroundStyle(.white.opacity(0.8)) }
+                                PlaybackTitle(episode: episode, model: model, style: titleStyle)
+                                    .id(episode.id + "|" + String(model.state.shows[episode.showID]?.aniListID ?? 0))
+                                if episode.number != nil { Text(labels(episode.display)).font(.callout).foregroundStyle(.white.opacity(0.8)) }
                             }.padding(.horizontal, 17).padding(.vertical, 11)
-                                .modifier(Glass(radius: 23, tint: .black.opacity(0.52), fallback: .black.opacity(0.72)))
+                                .modifier(VideoGlass(radius: 23))
                         }
                         Spacer()
                         HStack {
                             Spacer()
                             if let countdown = nextCountdown {
                                 HStack(spacing: 6) {
-                                    Button("Rester") { ending.resolved = true; nextCountdown = nil }.buttonStyle(ControlStyle())
+                                    Button(labels("Rester")) { ending.resolved = true; nextCountdown = nil }.buttonStyle(ControlStyle())
                                     Button { model.startNextEpisode() } label: {
-                                        Label("Épisode suivant · \(countdown) s", systemImage: "play.fill")
+                                        Label(labels("Épisode suivant · \(countdown) s"), systemImage: "play.fill")
                                     }.buttonStyle(ControlStyle(accent: true))
                                 }.padding(6).modifier(Glass(radius: 100, tint: .black.opacity(0.45), fallback: .black.opacity(0.70)))
                             } else if let skip = player.currentSkip {
                                 HStack(spacing: 6) {
-                                    if skip.kind == "op", !model.introKept {
-                                        Button("Garder l’intro") { model.keepIntro() }.buttonStyle(ControlStyle()).help("Annule le saut automatique")
+                                    if skip.kind == "op", !model.introKept, introBehavior != .manual {
+                                        Button(labels("Garder l’intro")) { model.keepIntro() }.buttonStyle(ControlStyle()).help("Annule le saut automatique")
                                     }
                                     Button { model.skipSegment(skip) } label: {
-                                        Label(model.introCountdown.map { "\(skip.label) · \($0) s" } ?? skip.label, systemImage: "forward.end.fill")
+                                        Label(labels(model.introCountdown.map { "\(skip.label) · \($0) s" } ?? skip.label), systemImage: "forward.end.fill")
                                     }.buttonStyle(ControlStyle(accent: true)).help("Raccourci S")
                                 }.padding(6).modifier(Glass(radius: 100, tint: .black.opacity(0.45), fallback: .black.opacity(0.70)))
                             } else if model.introUndo != nil {
-                                Button("Revoir l’intro") { model.undoIntro() }
+                                Button(labels("Revoir l’intro")) { model.undoIntro() }
                                     .buttonStyle(ControlStyle()).padding(6)
                             } else if player.paused, player.duration > 0, player.position >= player.duration - 1, model.next != nil {
-                                Button("Épisode suivant") { model.startNextEpisode() }.buttonStyle(ControlStyle(accent: true))
+                                Button(labels("Épisode suivant")) { model.startNextEpisode() }.buttonStyle(ControlStyle(accent: true))
                             }
                         }
                         if controls || player.paused || subtitlePanel {
@@ -68,9 +77,10 @@ struct Stage: View {
                                     if offer.announced {
                                         Text("Saison \(offer.next) annoncée").padding(8).background(.black.opacity(0.7), in: Capsule())
                                     } else {
-                                        Button { model.findSeason(offer, inPlayer: true) } label: {
-                                            Label("Chercher la saison \(offer.next)", systemImage: "arrow.down.to.line")
-                                        }.buttonStyle(ControlStyle()).padding(4).background(.black.opacity(0.7), in: Capsule())
+                                        Button { model.downloadSeason(offer, inPlayer: true) } label: {
+                                            Label(labels("Télécharger la saison \(offer.next)"), systemImage: "arrow.down.to.line")
+                                        }.buttonStyle(ControlStyle()).disabled(model.addingTorrent)
+                                            .padding(4).background(.black.opacity(0.7), in: Capsule())
                                     }
                                 }
                             }
@@ -91,9 +101,9 @@ struct Stage: View {
                 } else {
                     VStack(spacing: 14) {
                         Image(systemName: "play.rectangle").font(.system(size: 58, weight: .thin)).foregroundStyle(mint)
-                        Text("Glisse une vidéo ici").font(.system(size: 28, weight: .semibold))
-                        Button("Ouvrir une vidéo…") { model.chooseVideos() }.buttonStyle(ControlStyle(accent: true))
-                        Button("Téléchargements") { model.openPlayerDownloads() }.buttonStyle(ControlStyle())
+                        Text(labels("Glisse une vidéo ici")).font(YoruTypography.display(28))
+                        Button(labels("Ouvrir une vidéo…")) { model.chooseVideos() }.buttonStyle(ControlStyle(accent: true))
+                        Button(labels("Téléchargements")) { model.openPlayerDownloads() }.buttonStyle(ControlStyle())
                     }
                 }
                 if !player.error.isEmpty {
@@ -132,6 +142,11 @@ struct Stage: View {
             subtitlePanel.toggle()
         }
         .onChange(of: player.paused) { _ in activity(); updateSubtitleClearance() }
+        .onChange(of: controlsTimeout) { _ in activity() }
+        .onChange(of: autoAdvanceAtEnding) { enabled in
+            ending = IntroSession()
+            if !enabled { nextCountdown = nil }
+        }
         .onChange(of: model.current) { _ in
             ending = IntroSession()
             nextCountdown = nil
@@ -139,8 +154,8 @@ struct Stage: View {
             updateSubtitleClearance()
         }
         .onChange(of: player.position) { _ in
-            if controls, !player.paused, !subtitlePanel, !model.playerDownloadsOpen, seekValue == nil,
-               ProcessInfo.processInfo.systemUptime - visibility.lastActivity > 1.85 {
+            if controls, controlsTimeout > 0, !player.paused, !subtitlePanel, !model.playerDownloadsOpen, seekValue == nil,
+               ProcessInfo.processInfo.systemUptime - visibility.lastActivity > Double(controlsTimeout) {
                 controls = false
                 if fullscreen, !queue { NSCursor.setHiddenUntilMouseMoves(true) }
             }
@@ -161,6 +176,7 @@ struct Stage: View {
     }
 
     private func tickEnding() {
+        guard autoAdvanceAtEnding else { return }
         ending.lastActivity = visibility.lastActivity
         let action = ending.assess(mode: .countdown, uptime: ProcessInfo.processInfo.systemUptime,
                                   position: player.position, playing: !player.paused,
@@ -188,12 +204,23 @@ struct Stage: View {
             PlaybackTimeline(player: player, episode: model.current, seekValue: $seekValue,
                              previewsEnabled: !model.playerDownloadsOpen && !subtitlePanel && !model.settings)
                 .id(queue)
+            if showSeekButtons && queue {
+                HStack(spacing: 6) {
+                    seekButton(forward: false)
+                    seekButton(forward: true)
+                    Spacer()
+                }
+            }
             HStack(spacing: 9) {
                 HStack(spacing: 6) {
                     Image(systemName: player.volume == 0 ? "speaker.slash" : "speaker.wave.2")
                         .onTapGesture { player.setVolume(player.volume == 0 ? 80 : 0) }
                     Slider(value: Binding(get: { player.volume }, set: player.setVolume), in: 0...100)
                         .frame(maxWidth: queue ? 60 : 85).tint(mint).accessibilityLabel("Volume")
+                    if showSeekButtons && !queue {
+                        seekButton(forward: false)
+                        seekButton(forward: true)
+                    }
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 GlassGroup {
                   HStack(spacing: 9) {
@@ -229,7 +256,8 @@ struct Stage: View {
                     .background(SubtitleOptionsAnchor { subtitlePanel.toggle(); reveal() })
                     .popover(isPresented: $subtitlePanel, arrowEdge: .top) { subtitles }
                     .accessibilityAction(named: Text("Options des sous-titres")) { subtitlePanel.toggle(); reveal() }
-                    .help("Clic gauche : JP, FR, Aucun. Clic droit : options.")
+                    .help(englishInSubtitleCycle ? "Clic gauche pour JP, FR, EN ou Aucun. Clic droit pour les options."
+                        : "Clic gauche pour JP, FR ou Aucun. Clic droit pour les options.")
                 Button { model.openPlayerDownloads() } label: {
                     Image(systemName: model.activeTransfers.isEmpty ? "arrow.down.to.line" : "arrow.down.circle.fill")
                 }.buttonStyle(ControlStyle(selected: model.playerDownloadsOpen)).help("Téléchargements")
@@ -239,7 +267,20 @@ struct Stage: View {
                 }.frame(maxWidth: .infinity, alignment: .trailing)
             }
         }.padding(.horizontal, 15).padding(.vertical, 7)
-            .modifier(Glass(radius: 28, tint: .black.opacity(0.58), fallback: .black.opacity(0.75)))
+            .modifier(VideoGlass(radius: 28))
+    }
+
+    private func seekButton(forward: Bool) -> some View {
+        let step = [5, 10, 15, 30].contains(seekButtonSeconds) ? seekButtonSeconds : 10
+        let action = forward ? "Avancer de \(step) s" : "Reculer de \(step) s"
+        return Button {
+            activity()
+            player.seek(player.position + Double(forward ? step : -step))
+        } label: {
+            Image(systemName: "\(forward ? "goforward" : "gobackward").\(step)")
+                .font(.system(size: 17, weight: .semibold))
+        }.buttonStyle(ControlStyle(horizontalPadding: 9))
+            .help(labels(action)).accessibilityLabel(labels(action)).disabled(player.duration <= 0)
     }
 
     private var subtitles: some View {
@@ -311,7 +352,7 @@ struct Stage: View {
 
     private var playlist: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Liste de lecture").font(YoruTypography.display(23)).padding(.horizontal, 15)
+            Text(labels("Liste de lecture")).font(YoruTypography.display(23)).padding(.horizontal, 15)
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
@@ -320,7 +361,9 @@ struct Stage: View {
                                 HStack {
                                     Image(systemName: model.current == episode ? "play.fill" : model.progress(episode).watched ? "checkmark" : "play").foregroundStyle(mint)
                                     EpisodeStill(episode: episode, width: 47, height: 29)
-                                    Text(episode.season == model.current?.season ? episode.number.map { String(format: "%02d", $0) } ?? episode.title : episode.display)
+                                    Text(episode.number.map {
+                                        labels(episode.season == model.current?.season ? "Épisode \($0)" : episode.display)
+                                    } ?? episode.title)
                                         .font(YoruTypography.text(15, strong: true)).lineLimit(2)
                                     Spacer()
                                 }.padding(10).background(model.current == episode ? mint.opacity(0.14) : .clear, in: Capsule()).contentShape(Rectangle())
@@ -332,6 +375,25 @@ struct Stage: View {
         }.padding(.vertical, 17).frame(width: 232)
             .modifier(Glass(radius: 27, tint: .black.opacity(0.46), fallback: panel))
             .padding(.top, 9 + navigationClearance).padding(.bottom, 9).padding(.trailing, 9)
+    }
+}
+
+private struct PlaybackTitle: View {
+    let episode: Episode
+    let model: Model
+    let style: PlayerTitleStyle
+    @State private var native: String?
+
+    var body: some View {
+        let japanese = style == .japanese ? native : nil
+        Text(japanese ?? episode.title)
+            .font(japanese == nil ? YoruTypography.display(32, italic: true) : .system(size: 25, weight: .medium, design: .serif))
+            .lineLimit(2).minimumScaleFactor(0.75)
+            .task(id: style) {
+                guard style == .japanese else { return }
+                let title = await model.japaneseTitle(for: episode)
+                if !Task.isCancelled { native = title }
+            }
     }
 }
 
@@ -393,37 +455,94 @@ struct SettingsView: View {
     @AppStorage("preferredSubtitle") private var preferred = "fr"
     @AppStorage("theme") private var theme: YoruTheme = .creme
     @AppStorage("lightweight") private var lightweight = false
+    @AppStorage("lowercaseInterface") private var lowercaseInterface = false
+    @AppStorage("playerTitleStyle") private var titleStyle: PlayerTitleStyle = .wordmark
+    @AppStorage("showSeekButtons") private var showSeekButtons = false
+    @AppStorage("seekButtonSeconds") private var seekButtonSeconds = 10
+    @AppStorage("playerControlsTimeout") private var controlsTimeout = 2
+    @AppStorage("fitPlaybackOnFirstOpen") private var fitPlaybackOnFirstOpen = true
+    @AppStorage("inlinePlayerNavigation") private var inlinePlayerNavigation = true
+    @AppStorage("hidePlayerNavigationWithControls") private var hidePlayerNavigationWithControls = true
+    @AppStorage("autoAdvanceAtEnding") private var autoAdvanceAtEnding = true
+    @AppStorage("introBehavior") private var introBehavior: IntroBehavior = .adaptive
+    @AppStorage("englishInSubtitleCycle") private var englishInSubtitleCycle = false
+    @AppStorage("showRecommendations") private var showRecommendations = true
+    @AppStorage("showArtworkBlur") private var showArtworkBlur = true
+    @AppStorage("automaticDownloadSelection") private var automaticDownloadSelection = true
     @AppStorage("torrentGroups") private var groups = NyaaSource.defaults
     @AppStorage("minimumSeeds") private var seeds = 8
     @State private var jimaku = ""
     @State private var openKey = ""
     @State private var openUser = ""
     @State private var openPassword = ""
+    private var labels: InterfaceLabels { InterfaceLabels(lowercase: lowercaseInterface) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Réglages").font(YoruTypography.display(31)).padding(.bottom, 5)
+            Text(labels("Réglages")).font(YoruTypography.display(31)).padding(.bottom, 5)
             ScrollView {
                 Form {
-                    Section("Bibliothèque") {
-                        Button("Choisir le dossier…") { model.chooseFolder() }.buttonStyle(ControlStyle())
-                        Button("Importer les notes Nautiljon (.csv)…") {
-                            let panel = NSOpenPanel()
-                            panel.allowedContentTypes = [.commaSeparatedText]
-                            panel.directoryURL = model.folder
-                            if panel.runModal() == .OK, let url = panel.url { model.importRatings(url, announce: false) }
-                        }.buttonStyle(ControlStyle())
-                        Picker("Thème", selection: $theme) {
-                            ForEach(YoruTheme.allCases) { item in
-                                Text(item.name).tag(item)
+                    Section(labels("Bibliothèque")) {
+                        Button(labels("Choisir le dossier…")) { model.chooseFolder() }.buttonStyle(ControlStyle())
+                        Toggle(labels("Afficher les recommandations"), isOn: $showRecommendations).toggleStyle(.switch)
+                    }
+                    Section("Nautiljon") {
+                        Button(labels("Importer la liste « vus »…")) { importNautiljon(watchlist: false) }
+                            .buttonStyle(ControlStyle())
+                        Button(labels("Importer la liste « à voir »…")) { importNautiljon(watchlist: true) }
+                            .buttonStyle(ControlStyle())
+                    }
+                    Section(labels("Apparence")) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(labels("Thème")).font(YoruTypography.text(15, strong: true))
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 112), alignment: .leading)], spacing: 6) {
+                                ForEach(YoruTheme.allCases) { item in
+                                    Button { theme = item } label: {
+                                        HStack(spacing: 7) {
+                                            Circle().fill(item.accent).frame(width: 10, height: 10)
+                                            Text(item.name)
+                                        }
+                                    }.buttonStyle(ControlStyle(selected: theme == item, horizontalPadding: 8))
+                                        .accessibilityAddTraits(theme == item ? .isSelected : [])
+                                }
                             }
-                        }.pickerStyle(.segmented)
-                        Toggle("Interface légère", isOn: $lightweight).toggleStyle(.switch)
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                        Picker(labels("Titre dans le lecteur"), selection: $titleStyle) {
+                            Text(labels("Police Yoru")).tag(PlayerTitleStyle.wordmark)
+                            Text(labels("Japonais si disponible")).tag(PlayerTitleStyle.japanese)
+                        }
+                        Picker(labels("Position de la barre du lecteur"), selection: $inlinePlayerNavigation) {
+                            Text(labels("À côté des boutons macOS")).tag(true)
+                            Text(labels("Sous les boutons macOS")).tag(false)
+                        }
+                        Toggle(labels("Masquer la barre avec les commandes"), isOn: $hidePlayerNavigationWithControls)
+                            .toggleStyle(.switch)
+                        Toggle(labels("Libellés en minuscules"), isOn: $lowercaseInterface).toggleStyle(.switch)
+                        Toggle(labels("Fonds floutés"), isOn: $showArtworkBlur).toggleStyle(.switch)
+                        Toggle(labels("Interface légère"), isOn: $lightweight).toggleStyle(.switch)
+                    }
+                    Section(labels("Lecture")) {
+                        Toggle(labels("Ajuster la fenêtre à la première lecture"), isOn: $fitPlaybackOnFirstOpen).toggleStyle(.switch)
+                        Toggle(labels("Afficher les boutons d’avance et de recul"), isOn: $showSeekButtons).toggleStyle(.switch)
+                        if showSeekButtons {
+                            Picker(labels("Durée d’un saut"), selection: $seekButtonSeconds) {
+                                ForEach([5, 10, 15, 30], id: \.self) { Text("\($0) s").tag($0) }
+                            }
+                        }
+                        Picker(labels("Masquer les commandes"), selection: $controlsTimeout) {
+                            Text(labels("Jamais")).tag(0)
+                            ForEach([2, 3, 5, 8], id: \.self) { Text(labels("Après \($0) s")).tag($0) }
+                        }
+                        Picker(labels("Sauter l’intro"), selection: $introBehavior) {
+                            ForEach(IntroBehavior.allCases) { Text(labels($0.title)).tag($0) }
+                        }
+                        Toggle(labels("Enchaîner au générique de fin"), isOn: $autoAdvanceAtEnding).toggleStyle(.switch)
                     }
                     Section("Sous-titres") {
                         Picker("Langue préférée", selection: $preferred) {
-                            Text("Français").tag("fr"); Text("Japonais").tag("ja"); Text("Aucun").tag("off")
+                            Text("Français").tag("fr"); Text("Japonais").tag("ja"); Text("Anglais").tag("en"); Text("Aucun").tag("off")
                         }
+                        Toggle(labels("Inclure l’anglais dans le cycle des sous-titres"), isOn: $englishInSubtitleCycle).toggleStyle(.switch)
                         SecureField("Clé Jimaku", text: $jimaku)
                         SecureField("Clé OpenSubtitles", text: $openKey)
                         TextField("Identifiant OpenSubtitles", text: $openUser)
@@ -433,6 +552,7 @@ struct SettingsView: View {
                             .font(.caption).foregroundStyle(soft)
                     }
                     Section("Téléchargements") {
+                        Toggle(labels("Choisir automatiquement les versions"), isOn: $automaticDownloadSelection).toggleStyle(.switch)
                         TextField("Comptes Nyaa acceptés", text: $groups)
                         DisclosureGroup("Sources repérées sur Nyaa") {
                             ForEach(NyaaSource.catalog) { source in
@@ -473,5 +593,15 @@ struct SettingsView: View {
             .onAppear {
                 jimaku = Vault.get("jimaku"); openKey = Vault.get("open-key"); openUser = Vault.get("open-user"); openPassword = Vault.get("open-password")
             }
+    }
+
+    private func importNautiljon(watchlist: Bool) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        dismiss()
+        if watchlist { model.importNautiljonWatchlist(url) }
+        else { model.importRatings(url) }
     }
 }

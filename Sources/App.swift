@@ -25,6 +25,14 @@ struct Glass: ViewModifier {
     }
 }
 
+struct VideoGlass: ViewModifier {
+    let radius: CGFloat
+
+    func body(content: Content) -> some View {
+        content.modifier(Glass(radius: radius, tint: .black.opacity(0.54), fallback: .black.opacity(0.73)))
+    }
+}
+
 struct GlassGroup<Content: View>: View {
     var spacing: CGFloat = 5
     @ViewBuilder var content: Content
@@ -43,6 +51,8 @@ struct ControlStyle: ButtonStyle {
     @Environment(\.yoruTheme) private var theme
     var selected = false
     var accent = false
+    var horizontalPadding: CGFloat = 15
+    var compact = false
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.isEnabled) private var enabled
@@ -50,14 +60,15 @@ struct ControlStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         let dark = scheme == .dark
         let base = dark ? Color.white : ink
-        let tint = dark && theme != .nuit ? mint : theme.accent
+        let tint = dark && theme.colorScheme == .light ? mint : theme.accent
         let promoted = accent || selected
         let filledFallback = accent ? tint : selected ? tint.opacity(0.15) : base.opacity(configuration.isPressed ? 0.16 : 0.07)
         let text: Color
         if #available(macOS 26, *), !lightweight { text = selected && !accent ? tint : base }
         else { text = accent ? (dark ? ink : .white) : selected ? tint : base }
         return configuration.label.font(YoruTypography.text(15, strong: true))
-            .padding(.horizontal, 15).padding(.vertical, 8).frame(minHeight: 42)
+            .padding(.horizontal, horizontalPadding).padding(.vertical, compact ? 5 : 8)
+            .frame(minHeight: compact ? 32 : 42)
             .foregroundStyle(text)
             .contentShape(Capsule())
             .modifier(Glass(radius: 100, tint: promoted ? tint.opacity(accent ? 0.32 : 0.23) : nil,
@@ -72,12 +83,16 @@ struct ControlStyle: ButtonStyle {
     @StateObject private var model = Model()
     var body: some Scene {
         WindowGroup("Yoru Public") {
-            RootView(model: model)
-                .frame(minWidth: 780, minHeight: 510)
-                .dynamicTypeSize(.large)
-                .onOpenURL { model.openFiles([$0]) }
-                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in model.saveProgress() }
+            GeometryReader { geometry in
+                RootView(model: model, topInset: geometry.safeAreaInsets.top)
+                    .ignoresSafeArea(.container, edges: .top)
+            }
+            .frame(minWidth: 780, minHeight: 510)
+            .dynamicTypeSize(.large)
+            .onOpenURL { model.openFiles([$0]) }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in model.saveProgress() }
         }
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1150, height: 735)
         .commands {
             CommandGroup(replacing: .newItem) {
@@ -89,12 +104,48 @@ struct ControlStyle: ButtonStyle {
             }
             CommandMenu("Lecture") {
                 Button("Plein écran") { NSApp.keyWindow?.toggleFullScreen(nil) }.keyboardShortcut("f", modifiers: [.option, .command])
+                Button("Ajuster la fenêtre en 16:9") { if let window = NSApp.keyWindow { fitPlaybackWindow(window) } }
+                    .disabled(model.tab != .player)
                 Button("Ouvrir les sous-titres…") { model.chooseSubtitle() }
                 Button("Épisode précédent") { if let previous = model.previous { model.play(previous) } }.disabled(model.previous == nil)
                 Button("Épisode suivant") { model.startNextEpisode() }.disabled(model.next == nil)
             }
         }
     }
+}
+
+@discardableResult private func fitPlaybackWindow(_ window: NSWindow) -> Bool {
+    guard !window.styleMask.contains(.fullScreen), let area = window.screen?.visibleFrame else { return false }
+    let ratio = 16.0 / 9.0
+    let old = window.frame
+    let minWidth = max(window.minSize.width, window.minSize.height * ratio)
+    let maxWidth = min(area.width, area.height * ratio)
+    guard minWidth <= maxWidth else { return false }
+    let width = min(max(old.width, minWidth), maxWidth)
+    let height = width / ratio
+    let x = min(max(old.minX, area.minX), area.maxX - width)
+    let y = min(max(old.maxY - height, area.minY), area.maxY - height)
+    window.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true, animate: false)
+    return abs(window.frame.width / window.frame.height - ratio) < 0.01
+}
+
+private struct WindowAttachment: NSViewRepresentable {
+    let onAttach: (NSWindow) -> Void
+
+    final class Anchor: NSView {
+        var onAttach: ((NSWindow) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let window else { return }
+                onAttach?(window)
+            }
+        }
+    }
+
+    func makeNSView(context: Context) -> Anchor { Anchor() }
+    func updateNSView(_ view: Anchor, context: Context) { view.onAttach = onAttach }
 }
 
 private struct NavigationTabBounds: PreferenceKey {
@@ -154,19 +205,34 @@ private struct NavigationScroll: NSViewRepresentable {
 
 struct RootView: View {
     @ObservedObject var model: Model
+    let topInset: CGFloat
     @State private var keyMonitor: Any?
     @State private var dropTarget = false
     @State private var fullscreen = false
     @State private var fullscreenHeader = false
+    @State private var playbackControls = true
+    @State private var sizedForPlayback = false
+    private final class WindowReference { weak var window: NSWindow? }
+    @State private var windowReference = WindowReference()
     private let navigationHeight: CGFloat = 62
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("lightweight") private var lightweight = false
     @AppStorage("theme") private var theme: YoruTheme = .creme
+    @AppStorage("lowercaseInterface") private var lowercaseInterface = false
+    @AppStorage("fitPlaybackOnFirstOpen") private var fitPlaybackOnFirstOpen = true
+    @AppStorage("inlinePlayerNavigation") private var inlinePlayerNavigation = true
+    @AppStorage("hidePlayerNavigationWithControls") private var hidePlayerNavigationWithControls = true
+    private var labels: InterfaceLabels { InterfaceLabels(lowercase: lowercaseInterface) }
     private let timer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
     var body: some View {
         let inPlayer = model.tab == .player
-        let showsNavigation = !inPlayer || !fullscreen || fullscreenHeader
+        let visibleWithControls = playbackControls || !hidePlayerNavigationWithControls
+        let showsNavigation = !inPlayer || (fullscreen ? fullscreenHeader && visibleWithControls : model.current == nil || visibleWithControls)
+        let titlebar = fullscreen ? 0 : max(topInset, 32)
+        let inlineNavigation = inPlayer && !fullscreen && inlinePlayerNavigation
+        let headerOffset = inlineNavigation ? 0 : titlebar
+        let headerHeight: CGFloat = inlineNavigation ? 44 : navigationHeight
         ZStack(alignment: .top) {
             Group {
                 switch model.tab {
@@ -174,19 +240,27 @@ struct RootView: View {
                 case .library: LibraryView(model: model)
                 case .player:
                     Stage(model: model, player: model.player, fullscreen: fullscreen,
-                          navigationClearance: showsNavigation ? navigationHeight : 0)
+                          navigationClearance: fullscreen && !fullscreenHeader ? 0 : headerOffset + headerHeight,
+                          controls: $playbackControls)
                 case .downloads: DownloadView(model: model)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.top, inPlayer ? 0 : navigationHeight)
+            .padding(.top, inPlayer ? 0 : titlebar + navigationHeight)
         }
         .overlay(alignment: .top) {
-            if showsNavigation {
-                header
-                    .frame(height: navigationHeight)
-                    .transition(reduceMotion || lightweight ? .identity : .offset(y: -navigationHeight).combined(with: .opacity))
+            ZStack(alignment: .top) {
+                if showsNavigation {
+                    header(compact: inlineNavigation)
+                        .frame(height: headerHeight)
+                        .padding(.top, headerOffset)
+                        .background {
+                            if !inPlayer { theme.background }
+                        }
+                        .transition(reduceMotion || lightweight ? .identity : .offset(y: -6).combined(with: .opacity))
+                }
             }
+            .animation(reduceMotion || lightweight ? nil : YoruMotion.reveal, value: showsNavigation)
         }
         .background {
             EventActivity { event in
@@ -201,12 +275,32 @@ struct RootView: View {
             }.frame(width: 0, height: 0)
         }
         .background(model.tab == .player ? ink : theme.background)
+        .background {
+            WindowAttachment { window in
+                windowReference.window = window
+                sizeFirstPlayback()
+            }.frame(width: 0, height: 0)
+        }
         .font(YoruTypography.text(15))
         .foregroundStyle(model.tab == .player ? Color.white : theme.primary)
         .environment(\.yoruTheme, theme)
+        .environment(\.yoruLabels, labels)
         .preferredColorScheme(model.tab == .player ? .dark : theme.colorScheme)
         .overlay {
             if dropTarget { RoundedRectangle(cornerRadius: 16).strokeBorder(mint, lineWidth: 3).padding(8).allowsHitTesting(false) }
+        }
+        .overlay(alignment: .bottom) {
+            if !model.quickDownloadStatus.isEmpty {
+                HStack(spacing: 9) {
+                    ProgressView().controlSize(.small)
+                    Text(labels(model.quickDownloadStatus)).font(YoruTypography.text(15, strong: true))
+                }
+                .padding(.horizontal, 18).padding(.vertical, 10)
+                .foregroundStyle(theme.primary)
+                .background(theme.navigationSurface, in: Capsule())
+                .padding(.bottom, inPlayer ? 105 : 16)
+                .allowsHitTesting(false)
+            }
         }
         .onDrop(of: [.fileURL], isTargeted: $dropTarget) { providers in
             let group = DispatchGroup()
@@ -224,11 +318,17 @@ struct RootView: View {
         .onAppear {
             model.refresh()
             if keyMonitor == nil { keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { key($0) ? nil : $0 } }
+            sizeFirstPlayback()
             runSelfTest()
         }
         .onDisappear { if let keyMonitor { NSEvent.removeMonitor(keyMonitor); self.keyMonitor = nil } }
         .onReceive(timer) { _ in model.timer(); Task { await model.checkTransfers() } }
-        .onChange(of: model.tab) { tab in if tab != .player { model.closePlayerDownloads() } }
+        .onChange(of: model.tab) { tab in
+            if tab != .player { model.closePlayerDownloads() }
+            sizeFirstPlayback()
+        }
+        .onChange(of: model.current?.id) { _ in sizeFirstPlayback() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in sizeFirstPlayback() }
         .onChange(of: model.libraryReady) { ready in
             if ready { Task { await model.discover() } }
         }
@@ -241,7 +341,13 @@ struct RootView: View {
         } message: { Text(model.message) }
     }
 
-    private var header: some View {
+    private func sizeFirstPlayback() {
+        guard fitPlaybackOnFirstOpen, !sizedForPlayback, !fullscreen, model.tab == .player,
+              model.current != nil, let window = windowReference.window ?? NSApp.keyWindow, window.sheetParent == nil else { return }
+        sizedForPlayback = fitPlaybackWindow(window)
+    }
+
+    private func header(compact: Bool) -> some View {
         let player = model.tab == .player
         let tint = player ? YoruTheme.nuit.accent : theme.accent
         let primary = player ? Color.white : theme.primary
@@ -250,8 +356,8 @@ struct RootView: View {
         return ZStack {
             HStack {
                 HStack(spacing: 7) {
-                    Image(systemName: "moon.stars.fill").font(.system(size: 15, weight: .medium)).foregroundStyle(tint)
-                    Text("Yoru").font(YoruTypography.display(31, italic: true)).foregroundStyle(primary).offset(y: -1)
+                    Image(systemName: "moon.stars.fill").font(.system(size: compact ? 13 : 15, weight: .medium)).foregroundStyle(tint)
+                    Text("Yoru").font(YoruTypography.display(compact ? 26 : 31, italic: true)).foregroundStyle(primary).offset(y: -1)
                 }.accessibilityElement(children: .combine)
                 Spacer()
                 if !model.activeTransfers.isEmpty || !model.availableDownloads.isEmpty {
@@ -261,22 +367,24 @@ struct RootView: View {
                     } label: {
                         Image(systemName: model.activeTransfers.isEmpty ? "play.rectangle" : "arrow.down.circle")
                             .font(.system(size: 16)).foregroundStyle(tint)
-                    }.buttonStyle(ControlStyle()).accessibilityLabel("Ouvrir les transferts").help("Ouvrir les transferts")
+                    }.buttonStyle(ControlStyle(horizontalPadding: compact ? 11 : 15, compact: compact))
+                        .accessibilityLabel("Ouvrir les transferts").help("Ouvrir les transferts")
                         .disabled(model.addingTorrent)
                 }
                 Button { model.settings = true } label: {
                     Image(systemName: "gearshape").font(.system(size: 15, weight: .medium))
-                }.buttonStyle(ControlStyle()).accessibilityLabel("Réglages").help("Réglages")
+                }.buttonStyle(ControlStyle(horizontalPadding: compact ? 11 : 15, compact: compact))
+                    .accessibilityLabel("Réglages").help("Réglages")
             }
             HStack(spacing: 2) {
                 ForEach(Model.Tab.allCases, id: \.self) { tab in
                     let selected = model.tab == tab
                     Button { model.tab = tab } label: {
-                        Label(tab.rawValue, systemImage: tab == .home ? "house" : tab == .library ? "square.grid.2x2" : tab == .player ? "play.rectangle" : "arrow.down.to.line")
-                            .font(YoruTypography.text(15, strong: true))
+                        Label(labels(tab.rawValue), systemImage: tab == .home ? "house" : tab == .library ? "square.grid.2x2" : tab == .player ? "play.rectangle" : "arrow.down.to.line")
+                            .font(YoruTypography.text(compact ? 14 : 15, strong: true))
                             .foregroundStyle(selected ? primary : secondary)
-                            .padding(.horizontal, 13)
-                            .frame(height: 40)
+                            .padding(.horizontal, compact ? 8 : 13)
+                            .frame(height: compact ? 32 : 40)
                             .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
@@ -305,10 +413,18 @@ struct RootView: View {
                 }
             }
         }
-        .padding(.horizontal, 16).padding(.vertical, 5)
-        .modifier(Glass(radius: 27, tint: player ? .black.opacity(0.23) : nil,
-                        fallback: player ? .black.opacity(0.60) : theme.card))
-        .padding(.horizontal, 13).padding(.vertical, 5)
+        .padding(.horizontal, compact ? 12 : 16).padding(.vertical, compact ? 3 : 5)
+        .background {
+            if player {
+                Capsule().fill(.clear)
+                    .modifier(VideoGlass(radius: 27))
+            } else {
+                Capsule().fill(theme.navigationSurface)
+                    .overlay(Capsule().strokeBorder(theme.divider))
+            }
+        }
+        .padding(.horizontal, 13).padding(.vertical, compact ? 3 : 5)
+        .padding(.leading, compact ? 72 : 0)
     }
 
     private func key(_ event: NSEvent) -> Bool {
@@ -383,6 +499,16 @@ struct RootView: View {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             let loaded = model.player.loaded && model.player.duration > 0 && model.player.position > 0 && model.player.surface.renderedFrames > 0 && model.player.error.isEmpty
             print("PLAYBACK loaded=\(model.player.loaded) duration=\(model.player.duration) position=\(model.player.position) tracks=\(model.player.tracks.count) skips=\(model.player.skips.count) frames=\(model.player.surface.renderedFrames) error=\(model.player.error)")
+            if loaded, arguments.contains("--test-player-chrome"),
+               let window = windowReference.window ?? NSApp.keyWindow {
+                let ratio = window.frame.width / window.frame.height
+                for _ in 0..<26 where playbackControls { try? await Task.sleep(nanoseconds: 150_000_000) }
+                let hidden = !playbackControls
+                NotificationCenter.default.post(name: .yoruPlaybackActivity, object: nil)
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                print("CHROME ratio=\(ratio) idle-hidden=\(hidden) revealed=\(playbackControls)")
+                exit(abs(ratio - 16.0 / 9.0) < 0.01 && hidden && playbackControls ? 0 : 16)
+            }
             if loaded, let flag = arguments.firstIndex(of: "--test-torrent-panel"), arguments.indices.contains(flag + 1) {
                 let item = URL(fileURLWithPath: arguments[flag + 1])
                 model.openFiles([item])
@@ -455,6 +581,7 @@ struct RootView: View {
 struct LibraryView: View {
     @ObservedObject var model: Model
     @Environment(\.yoruTheme) private var theme
+    @Environment(\.yoruLabels) private var labels
     @State private var editShow: Series?
     @State private var planSheet = false
     @State private var plannedTitle = ""
@@ -463,6 +590,7 @@ struct LibraryView: View {
     @State private var episodeFrames: [String: CGRect] = [:]
     @State private var episodeSweep: EpisodeSweep?
     @State private var suppressClickUntil = 0.0
+    @State private var pendingTrash: [Episode] = []
     @Namespace private var episodeGrid
     @AppStorage("lightweight") private var lightweight = false
 
@@ -494,11 +622,12 @@ struct LibraryView: View {
                         .onChange(of: model.filter) { _ in if model.selectedSeries == nil { model.select(model.displayed.first?.id) } }
                     Button { model.refresh() } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(ControlStyle()).help("Actualiser")
                 }
-                HStack {
-                    Button("Tout") { model.watchlistOnly = false; if model.selectedSeries == nil { model.select(model.displayed.first?.id) } }
-                        .buttonStyle(ControlStyle(selected: !model.watchlistOnly))
-                    Button("À regarder") { model.watchlistOnly = true; if model.selectedSeries == nil { model.select(model.displayed.first?.id) } }
-                        .buttonStyle(ControlStyle(selected: model.watchlistOnly))
+                HStack(spacing: 4) {
+                    ForEach(Model.LibraryFilter.allCases) { filter in
+                        Button(labels(filter.rawValue)) { model.selectLibraryFilter(filter) }
+                            .buttonStyle(ControlStyle(selected: model.libraryFilter == filter, horizontalPadding: 9))
+                            .accessibilityAddTraits(model.libraryFilter == filter ? .isSelected : [])
+                    }
                 }
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -506,24 +635,30 @@ struct LibraryView: View {
                             ForEach(model.displayed) { item in
                                 Button { model.select(item.id) } label: {
                                     HStack(spacing: 10) {
-                                        AnimeCover(title: item.query, id: model.state.shows[item.id]?.aniListID, preview: item.episodes.first, width: 36, height: 51)
+                                        AnimeCover(title: item.query, id: model.state.shows[item.id]?.aniListID, preview: item.episodes.first, width: 40, height: 55)
                                         VStack(alignment: .leading, spacing: 5) {
-                                            Text(item.title).font(YoruTypography.text(16, strong: true)).lineLimit(2)
+                                            Text(item.title).font(YoruTypography.text(17, strong: true)).lineLimit(3)
                                             let total = item.episodes.count
                                             let watched = item.episodes.filter { model.progress($0).watched }.count
-                                            Text(total == 0 ? "À regarder" : total == 1 && item.episodes.first?.number == nil ? "Vidéo" : "\(watched) / \(total) vus")
-                                                .font(YoruTypography.text(13)).foregroundStyle(theme.mutedText)
+                                            Text(labels(total == 0 ? "À voir" : total == 1 && item.episodes.first?.number == nil ? "Vidéo" : "\(watched) / \(total) vus"))
+                                                .font(YoruTypography.text(14)).foregroundStyle(theme.mutedText)
                                         }
                                         Spacer(minLength: 4)
                                         if let score = model.score(item) { Text(score.formatted()).font(.system(size: 12, weight: .medium)).foregroundStyle(theme.accent) }
                                     }
-                                    .padding(.horizontal, 13).padding(.vertical, 10)
-                                    .background(model.selected == item.id ? theme.tint : Color.clear, in: RoundedRectangle(cornerRadius: 9))
+                                    .padding(.horizontal, 9).padding(.vertical, 8)
+                                    .background(model.selected == item.id ? theme.tint : Color.clear, in: RoundedRectangle(cornerRadius: 13))
                                     .overlay(alignment: .leading) {
                                         if model.selected == item.id { Capsule().fill(theme.accent).frame(width: 2, height: 21).allowsHitTesting(false) }
                                     }
                                     .contentShape(Rectangle())
                                 }.buttonStyle(.plain).id(item.id)
+                                    .accessibilityAddTraits(model.selected == item.id ? .isSelected : [])
+                            }
+                            if model.displayed.isEmpty {
+                                Text(labels(model.filter.trimmed.isEmpty ? "Aucune série ici" : "Aucun résultat"))
+                                    .font(YoruTypography.text(15)).foregroundStyle(theme.mutedText)
+                                    .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 9)
                             }
                         }
                     }
@@ -532,7 +667,7 @@ struct LibraryView: View {
                 Text(model.folder.path.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~"))
                     .font(.caption).foregroundStyle(theme.mutedText).lineLimit(1)
             }
-            .padding(18).frame(width: min(365, max(244, geometry.size.width * 0.245)))
+            .padding(15).frame(width: min(350, max(239, geometry.size.width * 0.25)))
             .modifier(Glass(radius: 27, tint: theme.card.opacity(0.3), fallback: theme.card))
             .padding(.leading, 13).padding(.vertical, 7)
             ScrollViewReader { proxy in
@@ -543,15 +678,30 @@ struct LibraryView: View {
                             metadata(show)
                             if let offer = model.suggestedSeason, offer.showID == show.id,
                                model.librarySeason == nil || model.librarySeason == offer.current {
-                                SeasonOfferCard(offer: offer) { model.findSeason(offer) }
+                                SeasonOfferCard(offer: offer, model: model)
                             }
-                            seasons(show)
+                            HStack(spacing: 12) {
+                                seasons(show)
+                                Spacer(minLength: 0)
+                                if !model.seasonEpisodes.isEmpty {
+                                    Button {
+                                        let selected = model.seasonEpisodes.filter { model.episodeSelection.contains($0.id) }
+                                        let focused = model.seasonEpisodes.first { $0.id == model.libraryEpisodeFocus }
+                                        if !selected.isEmpty { pendingTrash = selected }
+                                        else if let episode = focused ?? model.seasonEpisodes.first { pendingTrash = [episode] }
+                                    } label: {
+                                        Label(labels("Corbeille"), systemImage: "trash")
+                                    }.buttonStyle(ControlStyle())
+                                }
+                            }
                             episodeCards
                         } else {
                             VStack(alignment: .leading, spacing: 13) {
                                 SectionHeading(title: "Ta bibliothèque")
-                                Text("Choisis un dossier ou glisse une vidéo dans la fenêtre.").foregroundStyle(theme.mutedText)
-                                Button("Choisir un dossier…") { model.chooseFolder() }.buttonStyle(ControlStyle(accent: true))
+                                if model.series.isEmpty {
+                                    Text(labels("Choisis un dossier ou glisse une vidéo dans la fenêtre.")).foregroundStyle(theme.mutedText)
+                                    Button(labels("Choisir un dossier…")) { model.chooseFolder() }.buttonStyle(ControlStyle(accent: true))
+                                }
                             }.padding(.vertical, 45)
                         }
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(geometry.size.width > 1250 ? 34 : 23)
@@ -579,6 +729,14 @@ struct LibraryView: View {
             }
         }
         .sheet(item: $editShow) { show in EditShow(model: model, show: show) }
+        .alert(labels("Mettre à la corbeille ?"), isPresented: Binding(
+            get: { !pendingTrash.isEmpty }, set: { if !$0 { pendingTrash = [] } }
+        ), presenting: pendingTrash) { episodes in
+            Button(labels("Mettre à la corbeille"), role: .destructive) { model.trashEpisodes(episodes) }
+            Button(labels("Annuler"), role: .cancel) {}
+        } message: { episodes in
+            Text(episodes.count == 1 ? episodes[0].url.lastPathComponent : "\(episodes.count) vidéos")
+        }
         .onDisappear { model.clearEpisodeSelection() }
         .sheet(isPresented: $planSheet) {
             VStack(alignment: .leading, spacing: 12) {
@@ -654,14 +812,14 @@ struct LibraryView: View {
     private func selectionActions(_ count: Int) -> some View {
         HStack(spacing: 6) {
             if count > 0 {
-                Button("Marquer vus") { model.markEpisodeSelection(watched: true) }
+                Button(labels("Marquer vus")) { model.markEpisodeSelection(watched: true) }
                     .buttonStyle(ControlStyle(accent: true))
-                Button("Marquer non vus") { model.markEpisodeSelection(watched: false) }
+                Button(labels("Marquer non vus")) { model.markEpisodeSelection(watched: false) }
                     .buttonStyle(ControlStyle())
                 Button { model.clearEpisodeSelection() } label: { Image(systemName: "xmark") }
                     .buttonStyle(ControlStyle()).accessibilityLabel("Quitter la sélection")
             } else {
-                Button("Annuler") { model.undoEpisodeWatchChange() }.buttonStyle(ControlStyle())
+                Button(labels("Annuler")) { model.undoEpisodeWatchChange() }.buttonStyle(ControlStyle())
             }
         }.fixedSize()
     }
@@ -679,12 +837,12 @@ struct LibraryView: View {
             ScrollView(.horizontal) {
                 HStack {
                     if !seasons.isEmpty {
-                        Button("Tous") { model.selectSeason(nil) }.buttonStyle(ControlStyle(selected: model.librarySeason == nil))
+                        Button(labels("Tous")) { model.selectSeason(nil) }.buttonStyle(ControlStyle(selected: model.librarySeason == nil))
                         ForEach(seasons, id: \.self) { number in
-                            Button("Saison \(number)") { model.selectSeason(number) }
+                            Button(labels("Saison \(number)")) { model.selectSeason(number) }
                                 .buttonStyle(ControlStyle(selected: model.librarySeason == number))
                         }
-                    } else { Text(show.episodes.count == 1 ? "Vidéo" : "Épisodes").font(.title2.bold()) }
+                    } else { Text(labels(show.episodes.count == 1 ? "Vidéo" : "Épisodes")).font(.title2.bold()) }
                 }.padding(.vertical, 2)
             }.scrollIndicators(.hidden)
         }
@@ -693,6 +851,7 @@ struct LibraryView: View {
     func title(_ show: Series) -> some View {
         let episodes = model.seasonEpisodes
         let watched = episodes.filter { model.progress($0).watched }.count
+        let resume = model.resumeEpisode(in: episodes)
         return HStack(alignment: .center, spacing: 17) {
             AnimeCover(title: show.query, id: model.state.shows[show.id]?.aniListID, url: seasonCover,
                        preview: episodes.first, width: 83, height: 122)
@@ -709,14 +868,16 @@ struct LibraryView: View {
                     }.font(YoruTypography.text(14)).foregroundStyle(.white.opacity(0.75))
                 }
                 HStack(spacing: 6) {
-                    if let first = episodes.first(where: { !model.progress($0).watched }) ?? episodes.first {
+                    if let first = resume ?? episodes.first(where: { !model.progress($0).watched }) ?? episodes.first {
                         Button { model.play(first) } label: {
-                            Label(model.progress(first).seconds > 3 ? "Reprendre" : "Regarder", systemImage: "play.fill")
+                            Label(labels(resume == nil ? "Regarder" : "Reprendre"), systemImage: "play.fill")
                         }.buttonStyle(ControlStyle(accent: true))
+                            .help(resume.map { $0.display + " · " + formatTime(model.progress($0).seconds) } ?? first.display)
                     }
-                    Button { model.findDownloads(show) } label: {
-                        Label("Trouver un pack", systemImage: "arrow.down.to.line")
-                    }.buttonStyle(ControlStyle())
+                    Button { model.downloadLibrarySeason(show) } label: {
+                        Label(labels("Télécharger"), systemImage: "arrow.down.to.line")
+                    }.buttonStyle(ControlStyle()).disabled(model.addingTorrent)
+                        .contextMenu { Button(labels("Choisir une version")) { model.findDownloads(show) } }
                     Button {
                         model.updateShow(show.id) { $0.watchlist.toggle() }
                         if model.selectedSeries == nil { model.select(model.displayed.first?.id) }
@@ -800,9 +961,9 @@ struct LibraryView: View {
         let status = model.progress(episode)
         let focused = model.libraryEpisodeFocus == episode.id
         let selected = model.episodeSelection.contains(episode.id)
-        let title = model.librarySeason != nil
-            ? episode.number.map { String(format: "%02d", $0) } ?? episode.title
-            : episode.display
+        let title = episode.number.map {
+            labels(model.librarySeason != nil ? "Épisode \($0)" : episode.display)
+        } ?? episode.title
         let selecting = !model.episodeSelection.isEmpty
         let action = selecting ? (selected ? "Retirer de la sélection" : "Sélectionner") : "Lire"
         return Button { chooseEpisodeCard(episode) } label: {
@@ -844,7 +1005,7 @@ struct LibraryView: View {
                         }
                     }.frame(maxWidth: .infinity, alignment: .leading)
                     if status.watched {
-                        Label("Vu", systemImage: "checkmark")
+                        Label(labels("Vu"), systemImage: "checkmark")
                             .font(YoruTypography.text(13, strong: true)).foregroundStyle(theme.accent)
                     }
                 }.padding(.horizontal, 10).padding(.vertical, 9).frame(minHeight: 38)
@@ -872,6 +1033,7 @@ struct LibraryView: View {
                 Button(status.watched ? "Marquer non vu" : "Marquer vu") { model.toggleWatched(episode) }
                 Button("Chercher cette version") { if let item = model.selectedSeries { model.findDownloads(item, episode: episode) } }
                 Button("Afficher dans le Finder") { NSWorkspace.shared.activateFileViewerSelecting([episode.url]) }
+                Button(labels("Mettre à la corbeille"), role: .destructive) { pendingTrash = [episode] }
             }
     }
 }

@@ -20,17 +20,18 @@ struct PlaybackTimeline: View {
             GeometryReader { geometry in
                 let track = max(1, geometry.size.width - 2 * inset)
                 let preview = previewsEnabled ? seekValue ?? hover : nil
+                let trackHeight: CGFloat = preview == nil ? 4 : 6
                 let center = geometry.size.height / 2
                 ZStack {
                     ZStack(alignment: .topLeading) {
                         Capsule().fill(.white.opacity(0.23))
-                            .frame(width: track, height: preview == nil ? 4 : 6)
+                            .frame(width: track, height: trackHeight)
                             .position(x: geometry.size.width / 2, y: center)
                         if duration > 0 {
                             let played = position / duration * track
                             if played > 0 {
                                 Capsule().fill(mint)
-                                    .frame(width: played, height: preview == nil ? 4 : 6)
+                                    .frame(width: played, height: trackHeight)
                                     .position(x: inset + played / 2, y: center)
                             }
                             ForEach(Array(player.skips.enumerated()), id: \.offset) { _, segment in
@@ -39,7 +40,7 @@ struct PlaybackTimeline: View {
                                 if end > start {
                                     let width = max(2, (end - start) / duration * track)
                                     Capsule().fill(tint(segment))
-                                        .frame(width: width, height: 5)
+                                        .frame(width: width, height: trackHeight)
                                         .position(x: inset + (start + end) / (2 * duration) * track, y: center)
                                 }
                             }

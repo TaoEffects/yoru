@@ -1,5 +1,18 @@
 import Foundation
 
+enum IntroBehavior: String, CaseIterable, Identifiable {
+    case adaptive, countdown, manual
+
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .adaptive: return "Adaptatif"
+        case .countdown: return "Après 5 secondes"
+        case .manual: return "Manuel"
+        }
+    }
+}
+
 struct IntroPreference: Codable, Equatable {
     enum Mode: String, Codable { case countdown, immediate, manual }
     var mode = Mode.countdown

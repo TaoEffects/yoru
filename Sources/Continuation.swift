@@ -7,6 +7,7 @@ struct SeasonOffer: Equatable {
     var finale: Int
     var title: String
     var cover: URL?
+    var catalogID: Int
     var announced: Bool
     var key: String { showID + "|" + String(next) }
 
@@ -54,6 +55,6 @@ enum SeasonCatalog {
         guard let sequel, let title = sequel.title.english ?? sequel.title.romaji ?? sequel.title.native,
               sequel.status != "CANCELLED" else { return nil }
         return SeasonOffer(showID: show.id, current: season, next: number, finale: count, title: title,
-                           cover: sequel.coverImage?.large, announced: sequel.status == "NOT_YET_RELEASED")
+                           cover: sequel.coverImage?.large, catalogID: sequel.id, announced: sequel.status == "NOT_YET_RELEASED")
     }
 }

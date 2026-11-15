@@ -284,6 +284,17 @@ final class Player: ObservableObject {
     func seek(_ seconds: Double) {
         command(["seek", String(max(0, min(seconds, duration))), "absolute+exact"])
     }
+
+    func stop() {
+        command(["stop"])
+        ready = false
+        loaded = false
+        position = 0
+        duration = 0
+        skips = []
+        tracks = []
+        error = ""
+    }
     func toggle() {
         if reportedEnd { seek(0); reportedEnd = false; set("pause", "no"); return }
         set("pause", paused ? "no" : "yes")

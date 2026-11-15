@@ -19,10 +19,14 @@ struct TorrentResult: Identifiable, Equatable {
         return title.match(#"(?i)[ ._-]\d{1,3}\s*[-–~]\s*\d{1,3}\b"#) != nil
     }
     var artworkTitle: String {
+        matchingTitle
+            .replacingPattern(#"(?i)\s*\([^)]*\)\s*$"#).trimmed
+    }
+    var matchingTitle: String {
         ReleaseName(title).title
             .replacingPattern(#"(?i)\s*\(Season\s*\d+\).*$"#)
             .replacingPattern(#"(?i)\s+\d{1,3}[-–~]\d{1,3}.*$"#)
-            .replacingPattern(#"(?i)\s*\([^)]*\)\s*$"#).trimmed
+            .trimmed
     }
     var season: Int? {
         ReleaseName(title).season ?? SeasonNumber.first(in: title)
@@ -159,7 +163,8 @@ private struct Bencode {
 }
 
 enum TorrentSearch {
-    static func search(_ query: String, groups: String, minimumSeeds: Int, packs: Bool?, episode: Int?, season: Int? = nil, seasons: Set<Int> = []) async throws -> [TorrentResult] {
+    static func search(_ query: String, groups: String, minimumSeeds: Int, packs: Bool?, episode: Int?,
+                       season: Int? = nil, seasons: Set<Int> = [], resultLimit: Int? = nil) async throws -> [TorrentResult] {
         let accounts = Array(NyaaSource.accounts(groups).prefix(12))
         let requested = season.map { Set([$0]) } ?? seasons
         func feed(account: String) async throws -> [TorrentResult] {
@@ -212,12 +217,25 @@ enum TorrentSearch {
             let lhs = score($0), rhs = score($1)
             return lhs == rhs ? $0.id < $1.id : lhs > rhs
         }
+        if let resultLimit { return Array(ranked.prefix(resultLimit)) }
         if packs == nil, episode == nil {
             let batches = ranked.filter(\.isPack)
             let singles = ranked.filter { !$0.isPack }
             return Array(batches.prefix(18)) + Array(singles.prefix(max(32, 48 - batches.count)))
         }
         return Array(ranked.prefix(60))
+    }
+
+    static func seasonFiles(_ preview: TorrentPreview, season: Int, through last: Int?) -> [Int: Int] {
+        var files: [Int: Int] = [:]
+        for file in preview.files {
+            guard file.isVideo, file.path.match(Indexer.musicVideos) == nil, file.season == nil || file.season == season else { continue }
+            let filename = URL(fileURLWithPath: file.path).deletingPathExtension().lastPathComponent
+            let number = file.episode ?? Int(filename.trimmed)
+            guard let number, number > 0, last.map({ number <= $0 }) ?? true, files[number] == nil else { continue }
+            files[number] = file.id
+        }
+        return files
     }
 
     static func preview(_ item: TorrentResult) async throws -> TorrentPreview {
