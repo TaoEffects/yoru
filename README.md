@@ -14,7 +14,7 @@ Le lecteur vidéo et le moteur BitTorrent sont inclus. Cette édition est signé
 2. Pour voir tes séries, ouvre **Bibliothèque** et choisis le dossier qui contient tes vidéos.
 3. Pour les téléchargements, ouvre un fichier `.torrent` ou lance une recherche depuis l’onglet **Téléchargements**. Tu peux choisir les fichiers à récupérer, suivre le transfert et ouvrir les vidéos terminées avec **Regarder**. Le transfert est retiré à la fin du téléchargement.
 
-- **Espace** met en pause et **F** bascule en plein écran.
+- **Espace** met en pause et **F** bascule en plein écran. La barre de navigation flotte au-dessus de la vidéo et se révèle près du bord supérieur en plein écran. Fais défiler la barre à la molette ou au trackpad pour changer d’onglet.
 - Survole la barre du lecteur pour voir l’horodatage et, avec FFmpeg, une image de la scène. Les intros et génériques reconnus sont indiqués sur la barre.
 - Un clic gauche sur les sous-titres fait défiler JP, FR et Aucun. Un clic droit ouvre les autres pistes et les réglages de décalage.
 - Dans une saison, glisse sur les vignettes ou utilise **Maj + clic** pour changer le statut de plusieurs épisodes en une fois.

@@ -97,38 +97,93 @@ struct ControlStyle: ButtonStyle {
     }
 }
 
+private struct NavigationTabBounds: PreferenceKey {
+    static let defaultValue: [Model.Tab: Anchor<CGRect>] = [:]
+    static func reduce(value: inout [Model.Tab: Anchor<CGRect>], nextValue: () -> [Model.Tab: Anchor<CGRect>]) {
+        value.merge(nextValue()) { _, latest in latest }
+    }
+}
+
+private struct NavigationScroll: NSViewRepresentable {
+    let select: (Int) -> Void
+
+    final class Monitor: NSView {
+        var select: ((Int) -> Void)?
+        private var token: Any?
+        private var movement: CGFloat = 0
+        private var stepped = false
+        private var timestamp: Double = 0
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let token { NSEvent.removeMonitor(token); self.token = nil }
+            guard window != nil else { return }
+            token = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                self?.scroll(event) == true ? nil : event
+            }
+        }
+
+        private func scroll(_ event: NSEvent) -> Bool {
+            guard event.window == window, bounds.contains(convert(event.locationInWindow, from: nil)) else { return false }
+            guard event.momentumPhase.isEmpty else { return true }
+            if event.phase == .began || event.timestamp - timestamp > 0.24 {
+                movement = 0
+                stepped = false
+            }
+            timestamp = event.timestamp
+            let horizontal = event.scrollingDeltaX
+            let vertical = event.scrollingDeltaY
+            let delta = abs(horizontal) > abs(vertical) ? horizontal : vertical
+            guard delta != 0, !stepped else { return true }
+            movement += delta
+            if !event.hasPreciseScrollingDeltas || abs(movement) >= 24 {
+                stepped = true
+                select?(movement < 0 ? 1 : -1)
+            }
+            return true
+        }
+
+        deinit { if let token { NSEvent.removeMonitor(token) } }
+    }
+
+    func makeNSView(context: Context) -> Monitor { Monitor() }
+    func updateNSView(_ view: Monitor, context: Context) { view.select = select }
+}
+
 struct RootView: View {
     @ObservedObject var model: Model
     @State private var keyMonitor: Any?
     @State private var dropTarget = false
     @State private var fullscreen = false
     @State private var fullscreenHeader = false
-    @Namespace private var navSelection
+    private let navigationHeight: CGFloat = 62
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("lightweight") private var lightweight = false
     @AppStorage("theme") private var theme: YoruTheme = .creme
     private let timer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        VStack(spacing: 0) {
-            if !fullscreen || model.tab != .player {
-                header
+        let inPlayer = model.tab == .player
+        let showsNavigation = !inPlayer || !fullscreen || fullscreenHeader
+        Group {
+            switch model.tab {
+            case .home: HomeView(model: model)
+            case .library: LibraryView(model: model)
+            case .player:
+                Stage(model: model, player: model.player, fullscreen: fullscreen,
+                      navigationClearance: showsNavigation ? navigationHeight : 0)
+            case .downloads: DownloadView(model: model)
             }
-            Group {
-                switch model.tab {
-                case .home: HomeView(model: model)
-                case .library: LibraryView(model: model)
-                case .player: Stage(model: model, player: model.player, fullscreen: fullscreen)
-                case .downloads: DownloadView(model: model)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .transition(.opacity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.top, inPlayer ? 0 : navigationHeight)
         .overlay(alignment: .top) {
-            if fullscreen, model.tab == .player, fullscreenHeader {
+            if showsNavigation {
                 header
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .frame(height: navigationHeight)
+                    .transition(reduceMotion || lightweight ? .identity : .offset(y: -navigationHeight).combined(with: .opacity))
             }
         }
         .background {
@@ -148,7 +203,6 @@ struct RootView: View {
         .foregroundStyle(model.tab == .player ? Color.white : theme.primary)
         .environment(\.yoruTheme, theme)
         .preferredColorScheme(model.tab == .player ? .dark : theme.colorScheme)
-        .animation(reduceMotion || lightweight ? nil : .easeInOut(duration: 0.22), value: model.tab)
         .overlay {
             if dropTarget { RoundedRectangle(cornerRadius: 16).strokeBorder(mint, lineWidth: 3).padding(8).allowsHitTesting(false) }
         }
@@ -221,24 +275,37 @@ struct RootView: View {
                             .foregroundStyle(selected ? primary : secondary)
                             .padding(.horizontal, 13)
                             .frame(height: 40)
-                            .background {
-                                if selected {
-                                    Capsule().fill(.clear)
-                                        .modifier(Glass(radius: 100, tint: tint.opacity(0.24), fallback: tint.opacity(0.14)))
-                                        .matchedGeometryEffect(id: "onglet sélectionné", in: navSelection)
-                                        .allowsHitTesting(false)
-                                }
-                            }
                             .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
                     .accessibilityAddTraits(selected ? .isSelected : [])
                     .keyboardShortcut(tab == .home ? "0" : tab == .library ? "1" : tab == .player ? "2" : "3")
+                    .anchorPreference(key: NavigationTabBounds.self, value: .bounds) { [tab: $0] }
                 }
-            }.animation(reduceMotion || lightweight ? nil : YoruMotion.reveal, value: model.tab)
+            }
+            .backgroundPreferenceValue(NavigationTabBounds.self) { positions in
+                GeometryReader { geometry in
+                    if let anchor = positions[model.tab] {
+                        let bounds = geometry[anchor]
+                        Capsule().fill(.clear)
+                            .modifier(Glass(radius: 100, tint: tint.opacity(0.24), fallback: tint.opacity(0.14)))
+                            .frame(width: bounds.width, height: bounds.height)
+                            .position(x: bounds.midX, y: bounds.midY)
+                            .animation(reduceMotion || lightweight ? nil : YoruMotion.reveal, value: model.tab)
+                    }
+                }.allowsHitTesting(false)
+            }
+            .background {
+                NavigationScroll { direction in
+                    let tabs = Model.Tab.allCases
+                    guard let index = tabs.firstIndex(of: model.tab), tabs.indices.contains(index + direction) else { return }
+                    model.tab = tabs[index + direction]
+                }
+            }
         }
         .padding(.horizontal, 16).padding(.vertical, 5)
-        .modifier(Glass(radius: 27, tint: player ? .black.opacity(0.23) : nil, fallback: player ? ink : theme.card))
+        .modifier(Glass(radius: 27, tint: player ? .black.opacity(0.23) : nil,
+                        fallback: player ? .black.opacity(0.60) : theme.card))
         .padding(.horizontal, 13).padding(.vertical, 5)
     }
 

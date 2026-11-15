@@ -5,6 +5,7 @@ struct Stage: View {
     @ObservedObject var model: Model
     @ObservedObject var player: Player
     var fullscreen: Bool
+    let navigationClearance: CGFloat
     @State private var ending = IntroSession()
     @State private var nextCountdown: Int?
     @State private var subtitlePanel = false
@@ -86,7 +87,7 @@ struct Stage: View {
                             }
                             controlsBar
                         }
-                    }.padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 6)
+                    }.padding(.horizontal, 20).padding(.top, 18 + navigationClearance).padding(.bottom, 6)
                 } else {
                     VStack(spacing: 14) {
                         Image(systemName: "play.rectangle").font(.system(size: 58, weight: .thin)).foregroundStyle(mint)
@@ -109,7 +110,7 @@ struct Stage: View {
                         .clipShape(RoundedRectangle(cornerRadius: 27))
                         .modifier(Glass(radius: 27, tint: .black.opacity(0.62), fallback: panel))
                         .shadow(color: .black.opacity(0.4), radius: 18, x: -6)
-                        .padding(12)
+                        .padding(.horizontal, 12).padding(.bottom, 12).padding(.top, 12 + navigationClearance)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                         .environment(\.yoruTheme, .nuit)
                 }
@@ -330,7 +331,7 @@ struct Stage: View {
             }
         }.padding(.vertical, 17).frame(width: 232)
             .modifier(Glass(radius: 27, tint: .black.opacity(0.46), fallback: panel))
-            .padding(.vertical, 9).padding(.trailing, 9)
+            .padding(.top, 9 + navigationClearance).padding(.bottom, 9).padding(.trailing, 9)
     }
 }
 
