@@ -29,7 +29,7 @@ Yoru utilise AniList pour les fiches et les recommandations, AniSkip pour certai
 
 ## Compiler
 
-Sur un Mac avec Xcode 26 ou plus récent sélectionné en ligne de commande et les outils *cmake*, *ninja* et *pkg-config* installés, exécute :
+Sur un Mac avec Xcode 26 ou plus récent sélectionné en ligne de commande, installe *cmake*, *ninja* et *pkg-config*. Depuis la racine du dépôt, exécute les trois scripts dans cet ordre.
 
 ```sh
 ./prepare-mpv.sh
