@@ -1,0 +1,14 @@
+.DS_Store
+*.app
+*.zip
+*.dmg
+*.mkv
+*.mp4
+*.torrent
+*.csv
+*.resume
+.build/
+build/
+mpv-deps/
+torrent-deps/
+obj/
