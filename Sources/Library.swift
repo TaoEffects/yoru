@@ -129,7 +129,9 @@ struct SavedSegment: Codable {
 extension FileManager {
     static var support: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("Yoru Public", isDirectory: true)
+        let bundleID = Bundle.main.bundleIdentifier
+        let folder = bundleID == "io.github.taoeffects.yoru" ? "Yoru Public" : bundleID ?? "Yoru Public"
+        return base.appendingPathComponent(folder, isDirectory: true)
     }
 }
 

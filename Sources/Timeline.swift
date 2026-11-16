@@ -16,7 +16,7 @@ struct PlaybackTimeline: View {
         let position = min(max(seekValue ?? player.position, 0), duration)
         let timeWidth: CGFloat = duration >= 3600 ? 63 : 45
         HStack(spacing: 11) {
-            Text(formatTime(position)).frame(width: timeWidth, alignment: .leading)
+            Text(formatTime(position)).frame(width: timeWidth)
             GeometryReader { geometry in
                 let track = max(1, geometry.size.width - 2 * inset)
                 let preview = previewsEnabled ? seekValue ?? hover : nil
@@ -91,10 +91,13 @@ struct PlaybackTimeline: View {
                 })
             }
             .frame(height: 23)
+            .directionalValue { player.seek(player.position + 5 * $0) }
+            .disabled(duration == 0)
             .animation(reduceMotion || lightweight ? nil : .easeOut(duration: 0.17),
                        value: previewsEnabled && (seekValue != nil || hover != nil))
-            Text(formatTime(duration)).frame(width: timeWidth, alignment: .trailing)
+            Text(formatTime(duration)).frame(width: timeWidth)
         }
+        .padding(.horizontal, 4)
         .font(YoruTypography.text(13, strong: true).monospacedDigit())
         .onChange(of: episode?.id) { _ in hover = nil; seekValue = nil }
         .onChange(of: previewsEnabled) { enabled in if !enabled { hover = nil } }

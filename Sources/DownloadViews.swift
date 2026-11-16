@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct DownloadView: View {
+    @Environment(\.miniPlaybackClearance) private var miniPlaybackClearance
     @Environment(\.yoruTheme) private var theme
     @Environment(\.yoruLabels) private var labels
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -8,6 +9,7 @@ struct DownloadView: View {
     @ObservedObject var model: Model
     var inPlayer = false
     @State private var showFilters = false
+    @State private var expandedVersions: Set<EpisodeGroup> = []
 
     private struct EpisodeGroup: Hashable, Comparable {
         let title: String
@@ -33,9 +35,7 @@ struct DownloadView: View {
         }
         .foregroundStyle(theme.primary)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background {
-            if !inPlayer { ArtBackdrop() }
-        }
+        .padding(.bottom, miniPlaybackClearance)
         .task { await model.checkTransfers(force: true) }
     }
 
@@ -81,7 +81,7 @@ struct DownloadView: View {
                         .disabled(model.searching || model.search.trimmed.isEmpty)
                         .accessibilityLabel("Rechercher")
                 }
-                DisclosureGroup(labels("Filtres"), isExpanded: $showFilters) {
+                DirectionalDisclosure(expanded: $showFilters, title: labels("Filtres")) {
                     ViewThatFits(in: .horizontal) {
                         HStack { scope; numbers }
                         VStack(alignment: .leading, spacing: 8) { scope; numbers }
@@ -125,7 +125,9 @@ struct DownloadView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         resultRow(first, heading: labels("Épisode \(group.episode)"), details: "", episode: true)
                         if rows.count > 1 {
-                            DisclosureGroup(labels("Autres versions · \(rows.count - 1)")) {
+                            DirectionalDisclosure(expanded: Binding(get: { expandedVersions.contains(group) }, set: { value in
+                                if value { expandedVersions.insert(group) } else { expandedVersions.remove(group) }
+                            }), title: labels("Autres versions · \(rows.count - 1)")) {
                                 ForEach(rows.dropFirst()) { row in resultRow(row, heading: row.artworkTitle, details: "") }
                             }.padding(.horizontal, 12).padding(.bottom, 7)
                         }
@@ -186,7 +188,7 @@ struct DownloadView: View {
                 }.monospacedDigit()
                 Image(systemName: "chevron.right").font(.system(size: 13)).foregroundStyle(theme.mutedText)
             }.padding(inPlayer ? 9 : 11).contentShape(Rectangle())
-        }.buttonStyle(.plain).modifier(HoverCard()).help(row.title)
+        }.buttonStyle(DirectionalPlainStyle()).modifier(HoverCard()).help(row.title)
             .disabled(model.addingTorrent)
     }
 
@@ -318,7 +320,9 @@ struct DownloadView: View {
             Divider()
             HStack {
                 Spacer()
-                Button(model.addingTorrent ? "Préparation…" : "Télécharger") { model.addTorrent() }
+                Button { model.addTorrent() } label: {
+                    DownloadLabel(title: labels(model.addingTorrent ? "Préparation…" : "Télécharger"), busy: model.addingTorrent)
+                }
                     .buttonStyle(ControlStyle(accent: true))
                     .disabled(model.preview?.files.contains(where: { $0.isVideo && model.chosenFiles.contains($0.id) }) != true || model.addingTorrent)
             }

@@ -91,6 +91,8 @@ struct TorrentFilePicker: View {
             .allowsHitTesting(false))
         .contentShape(Rectangle())
         .onTapGesture { toggle(file.id) }
+        .directionalTarget(radius: 9) { toggle(file.id) }
+        .disabled(locked)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
         .accessibilityValue(selected ? "Sélectionné" : "Non sélectionné")

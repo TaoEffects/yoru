@@ -10,21 +10,34 @@ struct Stage: View {
     @State private var ending = IntroSession()
     @State private var nextCountdown: Int?
     @State private var subtitlePanel = false
+    @State private var audioOutputPanel = false
     @State private var advanced = false
     @State private var queue = false
     private final class Visibility { var lastActivity = 0.0 }
     @State private var visibility = Visibility()
     @State private var seekValue: Double?
+    @State private var controlsHeight: CGFloat = 81
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.yoruLabels) private var labels
     @AppStorage("lightweight") private var lightweight = false
     @AppStorage("playerTitleStyle") private var titleStyle: PlayerTitleStyle = .wordmark
+    @AppStorage("animatePlaybackButtons") private var animatePlaybackButtons = true
+    @State private var seekBackward = 0
+    @State private var seekForward = 0
+    @State private var previousPulse = 0
+    @State private var nextPulse = 0
     @AppStorage("showSeekButtons") private var showSeekButtons = false
+    @AppStorage("showAudioOutputButton") private var showAudioOutputButton = false
     @AppStorage("seekButtonSeconds") private var seekButtonSeconds = 10
     @AppStorage("playerControlsTimeout") private var controlsTimeout = 2
     @AppStorage("autoAdvanceAtEnding") private var autoAdvanceAtEnding = true
     @AppStorage("englishInSubtitleCycle") private var englishInSubtitleCycle = false
     @AppStorage("introBehavior") private var introBehavior: IntroBehavior = .adaptive
+
+    private struct ControlsHeight: PreferenceKey {
+        static let defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -35,6 +48,12 @@ struct Stage: View {
                     Rectangle().fill(.clear).contentShape(Rectangle())
                         .gesture(TapGesture(count: 2).onEnded { NSApp.keyWindow?.toggleFullScreen(nil) }
                             .exclusively(before: TapGesture().onEnded { queue = false; model.closePlayerDownloads(); activity() }))
+                    if player.pictureInPictureActive {
+                        Button { player.stopPictureInPicture() } label: {
+                            Label(labels("Revenir au lecteur"), systemImage: "pip.exit")
+                        }
+                        .buttonStyle(ControlStyle())
+                    }
                     VStack(alignment: .leading) {
                         if controls || player.paused {
                             VStack(alignment: .leading, spacing: 5) {
@@ -71,7 +90,7 @@ struct Stage: View {
                             }
                         }
                         if controls || player.paused || subtitlePanel {
-                            if let offer = model.seasonOffer(for: episode) {
+                            if model.allowsDownloads, let offer = model.seasonOffer(for: episode) {
                                 HStack {
                                     Spacer()
                                     if offer.announced {
@@ -84,7 +103,7 @@ struct Stage: View {
                                     }
                                 }
                             }
-                            if !model.playerDownloadsOpen, let transfer = model.activeTransfers.first(where: { $0.id == model.focusedTransfer }) ?? model.activeTransfers.first {
+                            if model.allowsDownloads, !model.playerDownloadsOpen, let transfer = model.activeTransfers.first(where: { $0.id == model.focusedTransfer }) ?? model.activeTransfers.first {
                                 Button { model.openPlayerDownloads() } label: {
                                     HStack(spacing: 8) {
                                         Image(systemName: "arrow.down.circle.fill")
@@ -93,7 +112,7 @@ struct Stage: View {
                                         Text(transfer.fraction.formatted(.percent.precision(.fractionLength(0)))).monospacedDigit()
                                     }.font(.caption.weight(.semibold)).padding(8)
                                       .background(.black.opacity(0.68), in: Capsule())
-                                }.buttonStyle(.plain).help("Voir les transferts")
+                                }.buttonStyle(DirectionalPlainStyle()).help("Voir les transferts")
                             }
                             controlsBar
                         }
@@ -103,7 +122,9 @@ struct Stage: View {
                         Image(systemName: "play.rectangle").font(.system(size: 58, weight: .thin)).foregroundStyle(mint)
                         Text(labels("Glisse une vidéo ici")).font(YoruTypography.display(28))
                         Button(labels("Ouvrir une vidéo…")) { model.chooseVideos() }.buttonStyle(ControlStyle(accent: true))
-                        Button(labels("Téléchargements")) { model.openPlayerDownloads() }.buttonStyle(ControlStyle())
+                        if model.allowsDownloads {
+                            Button(labels("Téléchargements")) { model.openPlayerDownloads() }.buttonStyle(ControlStyle())
+                        }
                     }
                 }
                 if !player.error.isEmpty {
@@ -123,16 +144,33 @@ struct Stage: View {
                         .padding(.horizontal, 12).padding(.bottom, 12).padding(.top, 12 + navigationClearance)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                         .environment(\.yoruTheme, .nuit)
+                        .environment(\.directionalLayer, 1)
                 }
             }
             if queue { playlist }
         }
         .onAppear { activity(); updateSubtitleClearance() }
-        .onDisappear { NSCursor.setHiddenUntilMouseMoves(false); player.subtitleClearance(false) }
+        .onDisappear { NSCursor.setHiddenUntilMouseMoves(false); player.subtitleClearance(0, animated: false) }
+        .onPreferenceChange(ControlsHeight.self) { height in
+            guard height > 0 else { return }
+            controlsHeight = height
+            updateSubtitleClearance()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResizeNotification)) { _ in updateSubtitleClearance() }
         .onChange(of: controls) { _ in updateSubtitleClearance() }
-        .onChange(of: subtitlePanel) { _ in activity() }
+        .onChange(of: subtitlePanel) { open in
+            if open { audioOutputPanel = false }
+            activity()
+        }
+        .onChange(of: audioOutputPanel) { open in
+            if open { subtitlePanel = false }
+            activity()
+        }
+        .onChange(of: showAudioOutputButton) { enabled in
+            if !enabled { audioOutputPanel = false }
+        }
         .onChange(of: model.playerDownloadsOpen) { open in
-            if open { queue = false }
+            if open { queue = false; audioOutputPanel = false }
             activity()
         }
         .onChange(of: fullscreen) { _ in queue = false; activity() }
@@ -142,6 +180,7 @@ struct Stage: View {
             subtitlePanel.toggle()
         }
         .onChange(of: player.paused) { _ in activity(); updateSubtitleClearance() }
+        .onChange(of: player.pictureInPictureActive) { _ in updateSubtitleClearance() }
         .onChange(of: controlsTimeout) { _ in activity() }
         .onChange(of: autoAdvanceAtEnding) { enabled in
             ending = IntroSession()
@@ -154,12 +193,12 @@ struct Stage: View {
             updateSubtitleClearance()
         }
         .onChange(of: player.position) { _ in
-            if controls, controlsTimeout > 0, !player.paused, !subtitlePanel, !model.playerDownloadsOpen, seekValue == nil,
+            if controls, controlsTimeout > 0, !player.paused, !subtitlePanel, !audioOutputPanel, !model.playerDownloadsOpen, seekValue == nil,
                ProcessInfo.processInfo.systemUptime - visibility.lastActivity > Double(controlsTimeout) {
                 controls = false
                 if fullscreen, !queue { NSCursor.setHiddenUntilMouseMoves(true) }
             }
-            if seekValue == nil, !subtitlePanel, !model.playerDownloadsOpen { model.introTick(); tickEnding() }
+            if seekValue == nil, !subtitlePanel, !audioOutputPanel, !model.playerDownloadsOpen { model.introTick(); tickEnding() }
         }
         .animation(reduceMotion || lightweight ? nil : YoruMotion.reveal, value: controls)
         .animation(reduceMotion || lightweight ? nil : YoruMotion.reveal, value: queue)
@@ -167,7 +206,8 @@ struct Stage: View {
     }
 
     private func updateSubtitleClearance() {
-        player.subtitleClearance(model.current != nil && (controls || player.paused))
+        let active = model.current != nil && !player.pictureInPictureActive && (controls || player.paused || subtitlePanel)
+        player.subtitleClearance(active ? max(0, controlsHeight - 10) : 0, animated: !reduceMotion && !lightweight)
     }
 
     private func activity() {
@@ -199,11 +239,12 @@ struct Stage: View {
         if !controls { controls = true }
     }
 
+    private var bounceButtons: Bool { animatePlaybackButtons && !reduceMotion && !lightweight }
+
     private var controlsBar: some View {
         VStack(spacing: 5) {
             PlaybackTimeline(player: player, episode: model.current, seekValue: $seekValue,
                              previewsEnabled: !model.playerDownloadsOpen && !subtitlePanel && !model.settings)
-                .id(queue)
             if showSeekButtons && queue {
                 HStack(spacing: 6) {
                     seekButton(forward: false)
@@ -217,6 +258,10 @@ struct Stage: View {
                         .onTapGesture { player.setVolume(player.volume == 0 ? 80 : 0) }
                     Slider(value: Binding(get: { player.volume }, set: player.setVolume), in: 0...100)
                         .frame(maxWidth: queue ? 60 : 85).tint(mint).accessibilityLabel("Volume")
+                        .directionalValue { player.setVolume(player.volume + 5 * $0) }
+                    if showAudioOutputButton {
+                        AudioOutputControl(player: player, showingChoices: $audioOutputPanel, iconOnly: true)
+                    }
                     if showSeekButtons && !queue {
                         seekButton(forward: false)
                         seekButton(forward: true)
@@ -224,22 +269,25 @@ struct Stage: View {
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 GlassGroup {
                   HStack(spacing: 9) {
-                    Button { if let previous = model.previous { model.play(previous) } } label: {
-                        Image(systemName: "backward.end.fill")
+                    Button {
+                        if let previous = model.previous { previousPulse += 1; model.play(previous) }
+                    } label: {
+                        Image(systemName: "backward.end.fill").playbackBounce(previousPulse, enabled: bounceButtons)
                     }.buttonStyle(ControlStyle()).help("Épisode précédent").accessibilityLabel("Épisode précédent").disabled(model.previous == nil)
                     Button { player.toggle() } label: {
                         Image(systemName: player.paused ? "play.fill" : "pause.fill")
                             .font(.system(size: 22, weight: .semibold))
                             .contentTransition(.opacity)
-                            .animation(reduceMotion || lightweight ? nil : YoruMotion.selection, value: player.paused)
+                            .animation(bounceButtons ? YoruMotion.selection : nil, value: player.paused)
+                            .playbackBounce(player.paused, enabled: bounceButtons)
                             .frame(width: 64, height: 48)
                             .foregroundStyle(.white)
                             .contentShape(Capsule())
                             .modifier(Glass(radius: 100, tint: mint.opacity(0.36), interactive: true,
                                             fallback: Color(red: 0.12, green: 0.35, blue: 0.29)))
-                    }.buttonStyle(.plain).help("Lecture / pause · Espace").accessibilityLabel(player.paused ? "Lecture" : "Pause")
-                    Button { model.startNextEpisode() } label: {
-                        Image(systemName: "forward.end.fill")
+                    }.buttonStyle(DirectionalPlainStyle(radius: 100, priority: 3)).help("Lecture / pause · Espace").accessibilityLabel(player.paused ? "Lecture" : "Pause")
+                    Button { nextPulse += 1; model.startNextEpisode() } label: {
+                        Image(systemName: "forward.end.fill").playbackBounce(nextPulse, enabled: bounceButtons)
                     }.buttonStyle(ControlStyle()).help("Épisode suivant").accessibilityLabel("Épisode suivant").disabled(model.next == nil)
                   }
                 }
@@ -254,20 +302,39 @@ struct Stage: View {
                     }
                 }.buttonStyle(ControlStyle(selected: subtitlePanel))
                     .background(SubtitleOptionsAnchor { subtitlePanel.toggle(); reveal() })
-                    .popover(isPresented: $subtitlePanel, arrowEdge: .top) { subtitles }
+                    .popover(isPresented: $subtitlePanel, arrowEdge: .top) {
+                        subtitles.environment(\.directionalLayer, 1)
+                            .environment(\.directionalBack, { subtitlePanel = false })
+                    }
                     .accessibilityAction(named: Text("Options des sous-titres")) { subtitlePanel.toggle(); reveal() }
                     .help(englishInSubtitleCycle ? "Clic gauche pour JP, FR, EN ou Aucun. Clic droit pour les options."
                         : "Clic gauche pour JP, FR ou Aucun. Clic droit pour les options.")
-                Button { model.openPlayerDownloads() } label: {
-                    Image(systemName: model.activeTransfers.isEmpty ? "arrow.down.to.line" : "arrow.down.circle.fill")
-                }.buttonStyle(ControlStyle(selected: model.playerDownloadsOpen)).help("Téléchargements")
-                    .accessibilityLabel("Téléchargements")
+                Button {
+                    if player.pictureInPictureActive {
+                        player.stopPictureInPicture()
+                    } else if let episode = model.current {
+                        model.closePlayerDownloads()
+                        player.startPictureInPicture(title: episode.title) { [weak model] in model?.tab = .player }
+                    }
+                    activity()
+                } label: {
+                    Image(systemName: player.pictureInPictureActive ? "pip.exit" : "pip.enter")
+                }
+                .buttonStyle(ControlStyle(selected: player.pictureInPictureActive))
+                .help(labels(player.pictureInPictureActive ? "Revenir au lecteur" : "Image dans l’image"))
+                .accessibilityLabel(labels(player.pictureInPictureActive ? "Revenir au lecteur" : "Image dans l’image"))
+                .disabled(!player.loaded && !player.pictureInPictureActive)
                 Button { model.closePlayerDownloads(); queue.toggle() } label: { Image(systemName: "list.bullet") }.buttonStyle(ControlStyle(selected: queue)).help("Liste de lecture")
                 Button { NSApp.keyWindow?.toggleFullScreen(nil) } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }.buttonStyle(ControlStyle()).help("Plein écran · F")
                 }.frame(maxWidth: .infinity, alignment: .trailing)
             }
         }.padding(.horizontal, 15).padding(.vertical, 7)
             .modifier(VideoGlass(radius: 28))
+            .background {
+                GeometryReader { geometry in
+                    Color.clear.preference(key: ControlsHeight.self, value: geometry.size.height)
+                }
+            }
     }
 
     private func seekButton(forward: Bool) -> some View {
@@ -275,10 +342,12 @@ struct Stage: View {
         let action = forward ? "Avancer de \(step) s" : "Reculer de \(step) s"
         return Button {
             activity()
+            if forward { seekForward += 1 } else { seekBackward += 1 }
             player.seek(player.position + Double(forward ? step : -step))
         } label: {
             Image(systemName: "\(forward ? "goforward" : "gobackward").\(step)")
                 .font(.system(size: 17, weight: .semibold))
+                .playbackBounce(forward ? seekForward : seekBackward, enabled: bounceButtons)
         }.buttonStyle(ControlStyle(horizontalPadding: 9))
             .help(labels(action)).accessibilityLabel(labels(action)).disabled(player.duration <= 0)
     }
@@ -293,20 +362,20 @@ struct Stage: View {
                     Button("Aucun") { model.pickSubtitles("off", remember: true) }.buttonStyle(ControlStyle(selected: language == nil))
                     Button("JP") { model.pickSubtitles("ja", remember: true) }.buttonStyle(ControlStyle(selected: language == "ja"))
                     Spacer()
-                    Menu("Autres pistes") {
+                    DirectionalMenu { Text(labels("Autres pistes")) } actions: { close in
                         ForEach(player.tracks.filter { $0.kind == "sub" }) { track in
-                            Button(track.label) { model.chooseTrack(track) }
+                            Button(track.label) { close(); model.chooseTrack(track) }.buttonStyle(ControlStyle())
                         }
                         Divider()
-                        Button("Ajouter un fichier…") { model.chooseSubtitle() }
-                        Button("Chercher en anglais") { model.pickSubtitles("en") }
+                        Button("Ajouter un fichier…") { close(); model.chooseSubtitle() }.buttonStyle(ControlStyle())
+                        Button("Chercher en anglais") { close(); model.pickSubtitles("en") }.buttonStyle(ControlStyle())
                     }.fixedSize()
                 }
                 if model.workingSubtitles { ProgressView().controlSize(.small) }
                 if !model.subtitleStatus.isEmpty { Text(model.subtitleStatus).font(.caption).foregroundStyle(soft) }
                 ForEach(model.subtitleOptions) { result in
                     Button { model.chooseCandidate(result) } label: { Label(result.name, systemImage: "arrow.down") }
-                        .buttonStyle(.plain).font(.caption).lineLimit(2)
+                        .buttonStyle(DirectionalPlainStyle()).font(.caption).lineLimit(2)
                 }
                 Divider()
                 Text("Décalage").font(.headline)
@@ -314,7 +383,7 @@ struct Stage: View {
                     Button("Plus tôt") { model.changeDelay(player.delay - 0.25) }.buttonStyle(ControlStyle())
                     Text(String(format: "%+.2f s", player.delay)).monospacedDigit().frame(minWidth: 50)
                     Button("Plus tard") { model.changeDelay(player.delay + 0.25) }.buttonStyle(ControlStyle())
-                    Button("Réinitialiser") { model.changeDelay(0) }.buttonStyle(.plain).font(.caption)
+                    Button("Réinitialiser") { model.changeDelay(0) }.buttonStyle(DirectionalPlainStyle()).font(.caption)
                 }
                 HStack {
                     Button("Recaler automatiquement") { model.autoSynchronize() }.buttonStyle(ControlStyle())
@@ -323,13 +392,15 @@ struct Stage: View {
                 }
                 if model.canAlignTwoPoints {
                     Button(model.syncAnchor == nil ? "Retenir le premier point" : "Appliquer les deux points") { model.syncPoint() }
-                        .buttonStyle(.plain).foregroundStyle(mint).disabled(model.workingSubtitles)
+                        .buttonStyle(DirectionalPlainStyle()).foregroundStyle(mint).disabled(model.workingSubtitles)
                 }
-                DisclosureGroup("Audio et repères", isExpanded: $advanced) {
+                DirectionalDisclosure(expanded: $advanced, title: labels("Audio et repères")) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Menu("Piste audio") {
+                        DirectionalMenu {
+                            Text(labels("Piste audio"))
+                        } actions: { close in
                             ForEach(player.tracks.filter { $0.kind == "audio" }) { track in
-                                Button(track.label) { player.audio(track.id) }
+                                Button(track.label) { close(); player.audio(track.id) }.buttonStyle(ControlStyle())
                             }
                         }
                         if let kind = model.modifyingSkip {
@@ -367,7 +438,7 @@ struct Stage: View {
                                         .font(YoruTypography.text(15, strong: true)).lineLimit(2)
                                     Spacer()
                                 }.padding(10).background(model.current == episode ? mint.opacity(0.14) : .clear, in: Capsule()).contentShape(Rectangle())
-                            }.buttonStyle(.plain).id(episode.id)
+                            }.buttonStyle(DirectionalPlainStyle()).id(episode.id)
                         }
                     }.padding(.horizontal, 7)
                 }.onAppear { if let current = model.current { proxy.scrollTo(current.id) } }
@@ -447,161 +518,4 @@ struct EventActivity: NSViewRepresentable {
     }
     func makeNSView(context: Context) -> Monitor { Monitor() }
     func updateNSView(_ view: Monitor, context: Context) { view.callback = callback }
-}
-
-struct SettingsView: View {
-    @ObservedObject var model: Model
-    @Environment(\.dismiss) private var dismiss
-    @AppStorage("preferredSubtitle") private var preferred = "fr"
-    @AppStorage("theme") private var theme: YoruTheme = .creme
-    @AppStorage("lightweight") private var lightweight = false
-    @AppStorage("lowercaseInterface") private var lowercaseInterface = false
-    @AppStorage("playerTitleStyle") private var titleStyle: PlayerTitleStyle = .wordmark
-    @AppStorage("showSeekButtons") private var showSeekButtons = false
-    @AppStorage("seekButtonSeconds") private var seekButtonSeconds = 10
-    @AppStorage("playerControlsTimeout") private var controlsTimeout = 2
-    @AppStorage("fitPlaybackOnFirstOpen") private var fitPlaybackOnFirstOpen = true
-    @AppStorage("inlinePlayerNavigation") private var inlinePlayerNavigation = true
-    @AppStorage("hidePlayerNavigationWithControls") private var hidePlayerNavigationWithControls = true
-    @AppStorage("autoAdvanceAtEnding") private var autoAdvanceAtEnding = true
-    @AppStorage("introBehavior") private var introBehavior: IntroBehavior = .adaptive
-    @AppStorage("englishInSubtitleCycle") private var englishInSubtitleCycle = false
-    @AppStorage("showRecommendations") private var showRecommendations = true
-    @AppStorage("showArtworkBlur") private var showArtworkBlur = true
-    @AppStorage("automaticDownloadSelection") private var automaticDownloadSelection = true
-    @AppStorage("torrentGroups") private var groups = NyaaSource.defaults
-    @AppStorage("minimumSeeds") private var seeds = 8
-    @State private var jimaku = ""
-    @State private var openKey = ""
-    @State private var openUser = ""
-    @State private var openPassword = ""
-    private var labels: InterfaceLabels { InterfaceLabels(lowercase: lowercaseInterface) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(labels("Réglages")).font(YoruTypography.display(31)).padding(.bottom, 5)
-            ScrollView {
-                Form {
-                    Section(labels("Bibliothèque")) {
-                        Button(labels("Choisir le dossier…")) { model.chooseFolder() }.buttonStyle(ControlStyle())
-                        Toggle(labels("Afficher les recommandations"), isOn: $showRecommendations).toggleStyle(.switch)
-                    }
-                    Section("Nautiljon") {
-                        Button(labels("Importer la liste « vus »…")) { importNautiljon(watchlist: false) }
-                            .buttonStyle(ControlStyle())
-                        Button(labels("Importer la liste « à voir »…")) { importNautiljon(watchlist: true) }
-                            .buttonStyle(ControlStyle())
-                    }
-                    Section(labels("Apparence")) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(labels("Thème")).font(YoruTypography.text(15, strong: true))
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 112), alignment: .leading)], spacing: 6) {
-                                ForEach(YoruTheme.allCases) { item in
-                                    Button { theme = item } label: {
-                                        HStack(spacing: 7) {
-                                            Circle().fill(item.accent).frame(width: 10, height: 10)
-                                            Text(item.name)
-                                        }
-                                    }.buttonStyle(ControlStyle(selected: theme == item, horizontalPadding: 8))
-                                        .accessibilityAddTraits(theme == item ? .isSelected : [])
-                                }
-                            }
-                        }.frame(maxWidth: .infinity, alignment: .leading)
-                        Picker(labels("Titre dans le lecteur"), selection: $titleStyle) {
-                            Text(labels("Police Yoru")).tag(PlayerTitleStyle.wordmark)
-                            Text(labels("Japonais si disponible")).tag(PlayerTitleStyle.japanese)
-                        }
-                        Picker(labels("Position de la barre du lecteur"), selection: $inlinePlayerNavigation) {
-                            Text(labels("À côté des boutons macOS")).tag(true)
-                            Text(labels("Sous les boutons macOS")).tag(false)
-                        }
-                        Toggle(labels("Masquer la barre avec les commandes"), isOn: $hidePlayerNavigationWithControls)
-                            .toggleStyle(.switch)
-                        Toggle(labels("Libellés en minuscules"), isOn: $lowercaseInterface).toggleStyle(.switch)
-                        Toggle(labels("Fonds floutés"), isOn: $showArtworkBlur).toggleStyle(.switch)
-                        Toggle(labels("Interface légère"), isOn: $lightweight).toggleStyle(.switch)
-                    }
-                    Section(labels("Lecture")) {
-                        Toggle(labels("Ajuster la fenêtre à la première lecture"), isOn: $fitPlaybackOnFirstOpen).toggleStyle(.switch)
-                        Toggle(labels("Afficher les boutons d’avance et de recul"), isOn: $showSeekButtons).toggleStyle(.switch)
-                        if showSeekButtons {
-                            Picker(labels("Durée d’un saut"), selection: $seekButtonSeconds) {
-                                ForEach([5, 10, 15, 30], id: \.self) { Text("\($0) s").tag($0) }
-                            }
-                        }
-                        Picker(labels("Masquer les commandes"), selection: $controlsTimeout) {
-                            Text(labels("Jamais")).tag(0)
-                            ForEach([2, 3, 5, 8], id: \.self) { Text(labels("Après \($0) s")).tag($0) }
-                        }
-                        Picker(labels("Sauter l’intro"), selection: $introBehavior) {
-                            ForEach(IntroBehavior.allCases) { Text(labels($0.title)).tag($0) }
-                        }
-                        Toggle(labels("Enchaîner au générique de fin"), isOn: $autoAdvanceAtEnding).toggleStyle(.switch)
-                    }
-                    Section("Sous-titres") {
-                        Picker("Langue préférée", selection: $preferred) {
-                            Text("Français").tag("fr"); Text("Japonais").tag("ja"); Text("Anglais").tag("en"); Text("Aucun").tag("off")
-                        }
-                        Toggle(labels("Inclure l’anglais dans le cycle des sous-titres"), isOn: $englishInSubtitleCycle).toggleStyle(.switch)
-                        SecureField("Clé Jimaku", text: $jimaku)
-                        SecureField("Clé OpenSubtitles", text: $openKey)
-                        TextField("Identifiant OpenSubtitles", text: $openUser)
-                        SecureField("Mot de passe OpenSubtitles", text: $openPassword)
-                        Text(FileManager.default.isExecutableFile(atPath: FileManager.support.appendingPathComponent("sync/bin/ffsubsync").path)
-                             ? "Recalage automatique installé." : "Pour le recalage automatique, lance install-sync.sh depuis le projet.")
-                            .font(.caption).foregroundStyle(soft)
-                    }
-                    Section("Téléchargements") {
-                        Toggle(labels("Choisir automatiquement les versions"), isOn: $automaticDownloadSelection).toggleStyle(.switch)
-                        TextField("Comptes Nyaa acceptés", text: $groups)
-                        DisclosureGroup("Sources repérées sur Nyaa") {
-                            ForEach(NyaaSource.catalog) { source in
-                                let enabled = NyaaSource.accounts(groups).contains(source.id)
-                                HStack(spacing: 9) {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Link(source.label + (source.label == source.id ? "" : " · " + source.id), destination: source.url)
-                                        Text(source.sample).font(.system(size: 13)).foregroundStyle(soft)
-                                    }
-                                    Spacer()
-                                    Button(enabled ? "Activé" : "Ajouter") {
-                                        var accounts = NyaaSource.accounts(groups).filter { $0 != source.id }
-                                        if !enabled { accounts.append(source.id) }
-                                        groups = accounts.joined(separator: ",")
-                                    }.buttonStyle(ControlStyle(selected: enabled))
-                                        .accessibilityLabel(enabled ? "Désactiver " + source.label : "Activer " + source.label)
-                                }
-                            }
-                        }
-                        Stepper("Minimum de seeders · \(seeds)", value: $seeds, in: 1...500)
-
-                    }
-                }.formStyle(.grouped).scrollContentBackground(.hidden)
-            }
-            HStack {
-                Spacer()
-                Button("Fermer") { dismiss() }.buttonStyle(ControlStyle()).keyboardShortcut(.cancelAction)
-                Button("Enregistrer les identifiants") {
-                    for (key, value) in [("jimaku", jimaku), ("open-key", openKey), ("open-user", openUser), ("open-password", openPassword)] {
-                        if value != Vault.get(key) { Vault.set(key, value) }
-                    }
-                    dismiss()
-                    Task { await model.checkTransfers() }
-                }.buttonStyle(ControlStyle(accent: true)).keyboardShortcut(.defaultAction)
-            }
-        }.padding(20).frame(width: 555, height: 610)
-            .modifier(Glass(radius: 27, tint: .black.opacity(0.32), fallback: ink))
-            .onAppear {
-                jimaku = Vault.get("jimaku"); openKey = Vault.get("open-key"); openUser = Vault.get("open-user"); openPassword = Vault.get("open-password")
-            }
-    }
-
-    private func importNautiljon(watchlist: Bool) {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.commaSeparatedText]
-        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        dismiss()
-        if watchlist { model.importNautiljonWatchlist(url) }
-        else { model.importRatings(url) }
-    }
 }

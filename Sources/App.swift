@@ -47,7 +47,20 @@ struct GlassGroup<Content: View>: View {
     }
 }
 
-struct ControlStyle: ButtonStyle {
+struct ControlStyle: PrimitiveButtonStyle {
+    var selected = false
+    var accent = false
+    var horizontalPadding: CGFloat = 15
+    var compact = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        Button(configuration)
+            .buttonStyle(VisualControlStyle(selected: selected, accent: accent, horizontalPadding: horizontalPadding, compact: compact))
+            .directionalTarget(radius: 100, action: configuration.trigger)
+    }
+}
+
+private struct VisualControlStyle: ButtonStyle {
     @Environment(\.yoruTheme) private var theme
     var selected = false
     var accent = false
@@ -81,6 +94,7 @@ struct ControlStyle: ButtonStyle {
 
 @main struct YoruApp: App {
     @StateObject private var model = Model()
+    @AppStorage(YoruUsageMode.preferenceKey) private var usagePreference = ""
     var body: some Scene {
         WindowGroup("Yoru Public") {
             GeometryReader { geometry in
@@ -97,10 +111,12 @@ struct ControlStyle: ButtonStyle {
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Ouvrir une vidéo…") { model.chooseVideos() }.keyboardShortcut("o")
-                Button("Choisir le dossier Movies…") { model.chooseFolder() }
+                if YoruUsageMode(rawValue: usagePreference)?.hasLibrary == true {
+                    Button("Choisir le dossier de la bibliothèque…") { model.chooseFolder(thenOpenLibrary: true) }
+                }
             }
             CommandGroup(replacing: .appSettings) {
-                Button("Réglages…") { model.settings = true }.keyboardShortcut(",")
+                Button("Réglages…") { model.settings = true }.keyboardShortcut(",").disabled(usagePreference.isEmpty)
             }
             CommandMenu("Lecture") {
                 Button("Plein écran") { NSApp.keyWindow?.toggleFullScreen(nil) }.keyboardShortcut("f", modifiers: [.option, .command])
@@ -207,56 +223,148 @@ struct RootView: View {
     @ObservedObject var model: Model
     let topInset: CGFloat
     @State private var keyMonitor: Any?
+    @State private var navigation = DirectionalNavigation()
+    @State private var controllers = ControllerInput()
     @State private var dropTarget = false
     @State private var fullscreen = false
     @State private var fullscreenHeader = false
     @State private var playbackControls = true
     @State private var sizedForPlayback = false
+    @State private var libraryBackdrop: URL?
     private final class WindowReference { weak var window: NSWindow? }
     @State private var windowReference = WindowReference()
     private let navigationHeight: CGFloat = 62
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @AppStorage("lightweight") private var lightweight = false
-    @AppStorage("theme") private var theme: YoruTheme = .creme
-    @AppStorage("lowercaseInterface") private var lowercaseInterface = false
+    @AppStorage("theme") private var theme: YoruTheme = InterfaceDefaults.theme
+    @AppStorage("lowercaseInterface") private var lowercaseInterface = InterfaceDefaults.lowercase
     @AppStorage("fitPlaybackOnFirstOpen") private var fitPlaybackOnFirstOpen = true
-    @AppStorage("inlinePlayerNavigation") private var inlinePlayerNavigation = true
+    @AppStorage("inlinePlayerNavigation") private var inlinePlayerNavigation = InterfaceDefaults.inlinePlayerNavigation
     @AppStorage("hidePlayerNavigationWithControls") private var hidePlayerNavigationWithControls = true
+    @State private var browsingPictureInPicture = false
+    @State private var pictureInPictureActive = false
+    @AppStorage("browsePlayback") private var browsePlayback: BrowsePlayback = .bubble
+    @AppStorage("playbackArrows") private var playbackArrows: PlaybackArrows = .hybrid
+    @AppStorage(YoruUsageMode.preferenceKey) private var usagePreference = ""
     private var labels: InterfaceLabels { InterfaceLabels(lowercase: lowercaseInterface) }
+    private var usage: YoruUsageMode? {
+        if CommandLine.arguments.contains("--self-test") { return .complete }
+        return YoruUsageMode(rawValue: usagePreference)
+    }
     private let timer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
     var body: some View {
+        screen
+        .onDrop(of: [.fileURL], isTargeted: $dropTarget, perform: openDroppedFiles)
+        .onAppear(perform: begin)
+        .onDisappear(perform: end)
+        .onReceive(timer) { _ in
+            model.timer()
+            if usage?.hasDownloads == true || !model.activeTransfers.isEmpty { Task { await model.checkTransfers() } }
+        }
+        .onChange(of: usagePreference) { _ in
+            guard let usage else { return }
+            navigation.clear()
+            applyMode(usage)
+        }
+        .onChange(of: model.tab) { tab in
+            model.presentedAnime = nil
+            model.watchlistOpen = false
+            if tab != .player { model.closePlayerDownloads() }
+            sizeFirstPlayback()
+            updateBrowsingPlayback()
+        }
+        .onChange(of: model.current?.id) { _ in sizeFirstPlayback(); updateBrowsingPlayback() }
+        .onChange(of: browsePlayback) { _ in updateBrowsingPlayback() }
+        .onReceive(model.player.$loaded.removeDuplicates()) { loaded in
+            if loaded { Task { @MainActor in updateBrowsingPlayback() } }
+        }
+        .onReceive(model.player.$pictureInPictureActive.removeDuplicates()) { pictureInPictureActive = $0 }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in sizeFirstPlayback() }
+        .onChange(of: model.libraryReady) { ready in
+            if ready { Task { await model.discover() } }
+        }
+        .onChange(of: model.state.history.values.filter(\.watched).count) { _ in Task { await model.discover() } }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in fullscreenHeader = false; fullscreen = true }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in fullscreenHeader = false; fullscreen = false }
+        .sheet(isPresented: $model.settings) { SettingsView(model: model) }
+        .alert("Yoru", isPresented: Binding(get: { !model.message.isEmpty }, set: { if !$0 { model.message = "" } })) {
+            Button("OK") { model.message = "" }
+        } message: { Text(model.message) }
+        .buttonStyle(DirectionalPlainStyle())
+        .environment(\.directionalNavigation, navigation)
+    }
+
+    @ViewBuilder private var screen: some View {
+        if usage != nil { layout }
+        else {
+            WelcomeView(titlebarClearance: max(topInset, 32)) { mode in usagePreference = mode.rawValue }
+                .environment(\.yoruTheme, theme)
+                .environment(\.yoruLabels, labels)
+                .preferredColorScheme(theme.colorScheme)
+        }
+    }
+
+    private func applyMode(_ mode: YoruUsageMode) {
+        if model.current == nil || !mode.tabs.contains(model.tab) { model.tab = mode.startTab }
+        if !mode.hasDownloads { model.closePlayerDownloads() }
+        if mode.hasLibrary { model.refresh() }
+        if mode.hasDownloads, model.libraryReady {
+            Task { await model.discover(); await model.checkTransfers(force: true) }
+        }
+    }
+
+    private var layout: some View {
         let inPlayer = model.tab == .player
+        let showMini = !inPlayer && model.current != nil && browsePlayback == .bubble && !pictureInPictureActive
         let visibleWithControls = playbackControls || !hidePlayerNavigationWithControls
         let showsNavigation = !inPlayer || (fullscreen ? fullscreenHeader && visibleWithControls : model.current == nil || visibleWithControls)
         let titlebar = fullscreen ? 0 : max(topInset, 32)
         let inlineNavigation = inPlayer && !fullscreen && inlinePlayerNavigation
         let headerOffset = inlineNavigation ? 0 : titlebar
         let headerHeight: CGFloat = inlineNavigation ? 44 : navigationHeight
-        ZStack(alignment: .top) {
+        let navigationClearance = headerOffset + headerHeight
+        let showPage = reduceMotion || lightweight || inPlayer ? AnyTransition.identity : YoruMotion.page
+        return ZStack(alignment: .top) {
             Group {
-                switch model.tab {
-                case .home: HomeView(model: model)
-                case .library: LibraryView(model: model)
-                case .player:
-                    Stage(model: model, player: model.player, fullscreen: fullscreen,
-                          navigationClearance: fullscreen && !fullscreenHeader ? 0 : headerOffset + headerHeight,
-                          controls: $playbackControls)
-                case .downloads: DownloadView(model: model)
+                if model.watchlistOpen {
+                    WatchlistGallery(model: model, navigationClearance: navigationClearance)
+                        .opacity(model.presentedAnime == nil ? 1 : 0)
+                        .disabled(model.presentedAnime != nil)
+                        .accessibilityHidden(model.presentedAnime != nil)
+                } else if model.presentedAnime == nil {
+                    switch model.tab {
+                    case .home: HomeView(model: model, navigationClearance: navigationClearance)
+                    case .library:
+                        LibraryView(model: model, backdrop: $libraryBackdrop, navigationClearance: navigationClearance)
+                    case .player:
+                        Stage(model: model, player: model.player, fullscreen: fullscreen,
+                              navigationClearance: fullscreen && !fullscreenHeader ? 0 : navigationClearance,
+                              controls: $playbackControls)
+                    case .downloads: DownloadView(model: model).padding(.top, navigationClearance)
+                    }
+                }
+                if let presentation = model.presentedAnime {
+                    AnimeProfileView(model: model, presentation: presentation, navigationClearance: navigationClearance)
+                        .id(presentation.id)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.top, inPlayer ? 0 : titlebar + navigationHeight)
+            .transition(showPage)
         }
+        .animation(reduceMotion || lightweight || inPlayer ? nil : YoruMotion.pageChange, value: model.tab)
+        .animation(reduceMotion || lightweight ? nil : YoruMotion.pageChange, value: model.presentedAnime?.id)
+        .animation(reduceMotion || lightweight ? nil : YoruMotion.pageChange, value: model.watchlistOpen)
         .overlay(alignment: .top) {
             ZStack(alignment: .top) {
+                if !inPlayer {
+                    menuEdgeFade(height: navigationClearance + 38)
+                }
                 if showsNavigation {
                     header(compact: inlineNavigation)
                         .frame(height: headerHeight)
                         .padding(.top, headerOffset)
-                        .background {
-                            if !inPlayer { theme.background }
-                        }
                         .transition(reduceMotion || lightweight ? .identity : .offset(y: -6).combined(with: .opacity))
                 }
             }
@@ -268,13 +376,22 @@ struct RootView: View {
                       let content = event.window?.contentView else { return }
                 let point = content.convert(event.locationInWindow, from: nil)
                 let distance = content.isFlipped ? point.y : content.bounds.maxY - point.y
-                let visible = (0...(fullscreenHeader ? 86.0 : 32.0)).contains(distance)
+                let visible = (0...(content.bounds.height * (fullscreenHeader ? 0.55 : 0.48))).contains(distance)
                 if visible != fullscreenHeader {
                     withAnimation(reduceMotion || lightweight ? nil : .easeOut(duration: 0.16)) { fullscreenHeader = visible }
                 }
             }.frame(width: 0, height: 0)
         }
-        .background(model.tab == .player ? ink : theme.background)
+        .background {
+            switch model.tab {
+            case .home:
+                if theme.secondaryGlow != nil { ArtBackdrop() }
+                else { theme.background }
+            case .library: ArtBackdrop(url: libraryBackdrop)
+            case .player: ink
+            case .downloads: ArtBackdrop()
+            }
+        }
         .background {
             WindowAttachment { window in
                 windowReference.window = window
@@ -283,11 +400,22 @@ struct RootView: View {
         }
         .font(YoruTypography.text(15))
         .foregroundStyle(model.tab == .player ? Color.white : theme.primary)
+        .environment(\.miniPlaybackClearance, showMini ? (model.quickDownloadStatus.isEmpty ? 61 : 106) : 0)
         .environment(\.yoruTheme, theme)
         .environment(\.yoruLabels, labels)
         .preferredColorScheme(model.tab == .player ? .dark : theme.colorScheme)
         .overlay {
             if dropTarget { RoundedRectangle(cornerRadius: 16).strokeBorder(mint, lineWidth: 3).padding(8).allowsHitTesting(false) }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if showMini, let episode = model.current {
+                MiniPlaybackView(model: model, episode: episode)
+                    .environment(\.yoruTheme, theme)
+                    .environment(\.yoruLabels, labels)
+                    .padding(.trailing, 19)
+                    .padding(.bottom, model.quickDownloadStatus.isEmpty ? 16 : 61)
+                    .transition(.opacity.combined(with: .offset(y: 8)))
+            }
         }
         .overlay(alignment: .bottom) {
             if !model.quickDownloadStatus.isEmpty {
@@ -302,43 +430,65 @@ struct RootView: View {
                 .allowsHitTesting(false)
             }
         }
-        .onDrop(of: [.fileURL], isTargeted: $dropTarget) { providers in
-            let group = DispatchGroup()
-            let urls = NSMutableArray()
-            for provider in providers {
-                group.enter()
-                _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                    if let url { DispatchQueue.main.async { urls.add(url); group.leave() } }
-                    else { group.leave() }
-                }
+    }
+
+    private func updateBrowsingPlayback() {
+        if model.tab == .player || browsePlayback != .pictureInPicture {
+            if browsingPictureInPicture {
+                browsingPictureInPicture = false
+                model.player.stopPictureInPicture(restore: false)
             }
-            group.notify(queue: .main) { model.openFiles(urls.compactMap { $0 as? URL }.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }) }
-            return !providers.isEmpty
+            return
         }
-        .onAppear {
-            model.refresh()
-            if keyMonitor == nil { keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { key($0) ? nil : $0 } }
-            sizeFirstPlayback()
-            runSelfTest()
+        guard !browsingPictureInPicture, !model.player.pictureInPictureActive,
+              model.player.loaded, let episode = model.current else { return }
+        browsingPictureInPicture = true
+        model.player.startPictureInPicture(title: episode.title) { [weak model] in model?.tab = .player }
+    }
+
+    private func begin() {
+        if let usage { applyMode(usage) }
+        if keyMonitor == nil {
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown], handler: handleEvent)
         }
-        .onDisappear { if let keyMonitor { NSEvent.removeMonitor(keyMonitor); self.keyMonitor = nil } }
-        .onReceive(timer) { _ in model.timer(); Task { await model.checkTransfers() } }
-        .onChange(of: model.tab) { tab in
-            if tab != .player { model.closePlayerDownloads() }
-            sizeFirstPlayback()
+        controllers.receive = { input in _ = navigate(input, in: NSApp.keyWindow) }
+        controllers.start()
+        sizeFirstPlayback()
+        runSelfTest()
+    }
+
+    private func end() {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor); self.keyMonitor = nil }
+        controllers.stop()
+        controllers.receive = nil
+    }
+
+    private func handleEvent(_ event: NSEvent) -> NSEvent? {
+        if event.type != .keyDown {
+            if let window = event.window { navigation.point(at: event.locationInWindow, in: window) }
+            else { navigation.clear() }
+            return event
         }
-        .onChange(of: model.current?.id) { _ in sizeFirstPlayback() }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in sizeFirstPlayback() }
-        .onChange(of: model.libraryReady) { ready in
-            if ready { Task { await model.discover() } }
+        return key(event) ? nil : event
+    }
+
+    private func openDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
+        let group = DispatchGroup()
+        let urls = NSMutableArray()
+        for provider in providers {
+            group.enter()
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                if let url { DispatchQueue.main.async { urls.add(url); group.leave() } }
+                else { group.leave() }
+            }
         }
-        .onChange(of: model.state.history.values.filter(\.watched).count) { _ in Task { await model.discover() } }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in fullscreenHeader = false; fullscreen = true }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in fullscreenHeader = false; fullscreen = false }
-        .sheet(isPresented: $model.settings) { SettingsView(model: model).preferredColorScheme(.dark) }
-        .alert("Yoru", isPresented: Binding(get: { !model.message.isEmpty }, set: { if !$0 { model.message = "" } })) {
-            Button("OK") { model.message = "" }
-        } message: { Text(model.message) }
+        group.notify(queue: .main) {
+            let files = urls.compactMap { $0 as? URL }
+            model.openFiles(files.sorted {
+                $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+            })
+        }
+        return !providers.isEmpty
     }
 
     private func sizeFirstPlayback() {
@@ -347,12 +497,46 @@ struct RootView: View {
         sizedForPlayback = fitPlaybackWindow(window)
     }
 
+    private func menuEdgeFade(height: CGFloat) -> some View {
+        Group {
+            if lightweight || reduceTransparency { theme.background }
+            else { Rectangle().fill(.regularMaterial) }
+        }
+        .frame(height: height)
+        .mask(alignment: .top) {
+            LinearGradient(stops: [
+                .init(color: .black, location: 0),
+                .init(color: .black.opacity(0.90), location: 0.30),
+                .init(color: .black.opacity(0.54), location: 0.63),
+                .init(color: .black.opacity(0.12), location: 0.87),
+                .init(color: .clear, location: 1)
+            ], startPoint: .top, endPoint: .bottom)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder private var menuGlass: some View {
+        if #available(macOS 26, *), !lightweight, !reduceTransparency {
+            Capsule().fill(.clear)
+                .glassEffect(.clear, in: Capsule())
+                .background(theme.background.opacity(0.14), in: Capsule())
+        } else if !lightweight, !reduceTransparency {
+            Capsule().fill(.thinMaterial)
+                .overlay(Capsule().strokeBorder(theme.divider))
+        } else {
+            Capsule().fill(theme.navigationSurface)
+                .overlay(Capsule().strokeBorder(theme.divider))
+        }
+    }
+
     private func header(compact: Bool) -> some View {
         let player = model.tab == .player
         let tint = player ? YoruTheme.nuit.accent : theme.accent
         let primary = player ? Color.white : theme.primary
-        let secondary = player ? Color.white.opacity(0.62) : theme.mutedText
+        let secondary = player ? Color.white.opacity(0.62) : theme.primary.opacity(0.80)
 
+        let tabs = usage?.tabs ?? []
         return ZStack {
             HStack {
                 HStack(spacing: 7) {
@@ -360,34 +544,36 @@ struct RootView: View {
                     Text("Yoru").font(YoruTypography.display(compact ? 26 : 31, italic: true)).foregroundStyle(primary).offset(y: -1)
                 }.accessibilityElement(children: .combine)
                 Spacer()
-                if !model.activeTransfers.isEmpty || !model.availableDownloads.isEmpty {
-                    Button {
-                        model.selectDownloadPane(.transfers)
-                        model.tab = .downloads
-                    } label: {
-                        Image(systemName: model.activeTransfers.isEmpty ? "play.rectangle" : "arrow.down.circle")
-                            .font(.system(size: 16)).foregroundStyle(tint)
-                    }.buttonStyle(ControlStyle(horizontalPadding: compact ? 11 : 15, compact: compact))
-                        .accessibilityLabel("Ouvrir les transferts").help("Ouvrir les transferts")
-                        .disabled(model.addingTorrent)
-                }
                 Button { model.settings = true } label: {
                     Image(systemName: "gearshape").font(.system(size: 15, weight: .medium))
                 }.buttonStyle(ControlStyle(horizontalPadding: compact ? 11 : 15, compact: compact))
                     .accessibilityLabel("Réglages").help("Réglages")
             }
             HStack(spacing: 2) {
-                ForEach(Model.Tab.allCases, id: \.self) { tab in
+                ForEach(tabs, id: \.self) { tab in
                     let selected = model.tab == tab
-                    Button { model.tab = tab } label: {
-                        Label(labels(tab.rawValue), systemImage: tab == .home ? "house" : tab == .library ? "square.grid.2x2" : tab == .player ? "play.rectangle" : "arrow.down.to.line")
+                    let transfers = tab == .downloads ? model.activeTransfers.count : 0
+                    Button {
+                        model.presentedAnime = nil
+                        model.watchlistOpen = false
+                        if transfers > 0, model.tab != .downloads { model.selectDownloadPane(.transfers) }
+                        model.tab = tab
+                    } label: {
+                        HStack(spacing: 6) {
+                            Label(labels(tab.rawValue), systemImage: tab == .home ? "house" : tab == .library ? "square.grid.2x2" : tab == .player ? "play.rectangle" : "arrow.down.to.line")
+                            if transfers > 0 {
+                                Text(transfers.formatted()).monospacedDigit()
+                                    .font(YoruTypography.text(12, strong: true)).foregroundStyle(tint)
+                            }
+                        }
                             .font(YoruTypography.text(compact ? 14 : 15, strong: true))
                             .foregroundStyle(selected ? primary : secondary)
                             .padding(.horizontal, compact ? 8 : 13)
                             .frame(height: compact ? 32 : 40)
                             .contentShape(Capsule())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(DirectionalPlainStyle(radius: 100, priority: selected ? 1 : 0))
+                    .accessibilityLabel(transfers > 0 ? "\(labels(tab.rawValue)), \(transfers) en cours" : labels(tab.rawValue))
                     .accessibilityAddTraits(selected ? .isSelected : [])
                     .keyboardShortcut(tab == .home ? "0" : tab == .library ? "1" : tab == .player ? "2" : "3")
                     .anchorPreference(key: NavigationTabBounds.self, value: .bounds) { [tab: $0] }
@@ -407,7 +593,6 @@ struct RootView: View {
             }
             .background {
                 NavigationScroll { direction in
-                    let tabs = Model.Tab.allCases
                     guard let index = tabs.firstIndex(of: model.tab), tabs.indices.contains(index + direction) else { return }
                     model.tab = tabs[index + direction]
                 }
@@ -419,60 +604,129 @@ struct RootView: View {
                 Capsule().fill(.clear)
                     .modifier(VideoGlass(radius: 27))
             } else {
-                Capsule().fill(theme.navigationSurface)
-                    .overlay(Capsule().strokeBorder(theme.divider))
+                menuGlass
             }
         }
         .padding(.horizontal, 13).padding(.vertical, compact ? 3 : 5)
         .padding(.leading, compact ? 72 : 0)
     }
 
-    private func key(_ event: NSEvent) -> Bool {
-        if event.keyCode == 53, model.tab == .player, model.playerDownloadsOpen, !model.settings {
-            if model.inspected != nil, !model.addingTorrent { model.inspected = nil }
-            else { model.closePlayerDownloads() }
-            return true
+    private func navigate(_ input: NavigationInput, in window: NSWindow?) -> Bool {
+        guard let window else { return false }
+        if !model.message.isEmpty {
+            switch input {
+            case .activate, .back: model.message = ""; return true
+            case .move, .playPause: return false
+            }
         }
-        guard !model.settings, model.message.isEmpty, (model.inspected == nil || (model.tab != .downloads && !model.playerDownloadsOpen)), event.window?.firstResponder is NSTextView == false,
-              event.modifierFlags.intersection([.command, .option, .control]).isEmpty else { return false }
-        let code = event.keyCode
-        if model.tab == .library {
-            let list = model.displayed
-            guard !list.isEmpty else { return false }
-            let index = list.firstIndex { $0.id == model.selected } ?? 0
-            let episodes = model.seasonEpisodes
-            let ep = episodes.firstIndex { $0.id == model.libraryEpisodeFocus } ?? 0
-            if code == 53, !model.episodeSelection.isEmpty {
+        let main = window === windowReference.window
+        if case .back = input {
+            if let editor = window.firstResponder as? NSTextView, editor.isFieldEditor {
+                return window.makeFirstResponder(nil)
+            }
+            if navigation.closeOverlay(in: window) { return true }
+            if model.settings { model.settings = false; return true }
+            if !main { return NSApp.sendAction(Selector(("cancelOperation:")), to: nil, from: nil) }
+            if model.presentedAnime != nil { model.presentedAnime = nil; navigation.clear(); return true }
+            if model.watchlistOpen { model.watchlistOpen = false; navigation.clear(); return true }
+            if model.tab == .player, model.playerDownloadsOpen {
+                if model.inspected != nil, !model.addingTorrent { model.inspected = nil }
+                else { model.closePlayerDownloads() }
+                return true
+            }
+            if model.tab == .library, !model.episodeSelection.isEmpty {
                 model.clearEpisodeSelection()
                 return true
             }
-            if event.modifierFlags.contains(.shift), !episodes.isEmpty, code == 123 || code == 124 {
-                let next = min(episodes.count - 1, max(0, ep + (code == 123 ? -1 : 1)))
+            if navigation.hasFocus { navigation.clear(); return true }
+            return false
+        }
+        if case .playPause = input {
+            guard main, model.current != nil else { return false }
+            model.player.toggle()
+            NotificationCenter.default.post(name: .yoruPlaybackActivity, object: nil)
+            return true
+        }
+        if let editor = window.firstResponder as? NSTextView {
+            guard editor.isFieldEditor, case .move(let direction) = input, direction.vertical,
+                  window.makeFirstResponder(nil) else { return false }
+        }
+        let player = main && model.tab == .player && model.current != nil
+        if player {
+            let hidden = !playbackControls
+            if fullscreen { fullscreenHeader = true }
+            NotificationCenter.default.post(name: .yoruPlaybackActivity, object: nil)
+            if hidden {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    guard window.isKeyWindow, model.tab == .player else { return }
+                    if case .move(let direction) = input { navigation.move(direction, in: window) }
+                    if case .activate = input { navigation.activate(in: window) }
+                }
+                return true
+            }
+        }
+        switch input {
+        case .move(let direction): return navigation.move(direction, in: window)
+        case .activate:
+            if navigation.activate(in: window) { return true }
+            if !main, let button = window.defaultButtonCell?.controlView as? NSButton, button.isEnabled {
+                button.performClick(nil)
+                return true
+            }
+            return false
+        case .back, .playPause: return false
+        }
+    }
+
+    private func key(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags
+        guard flags.intersection([.command, .control]).isEmpty,
+              let window = event.window, window.isKeyWindow else { return false }
+        let main = window === windowReference.window
+        let code = event.keyCode
+        if code == 53 {
+            return navigate(.back, in: window)
+        }
+        guard model.message.isEmpty else { return false }
+        if let direction = NavigationDirection(keyCode: code) {
+            if window.firstResponder is NSTextView,
+               (!direction.vertical || !flags.intersection([.option, .shift]).isEmpty) { return false }
+            let playingVideo = main && model.tab == .player && model.current != nil
+            let videoShortcut = flags.contains(.option) || (flags.isDisjoint(with: [.shift])
+                && playbackArrows.controlsVideo(paused: model.player.paused))
+            if playingVideo, videoShortcut, !navigation.hasOverlay(in: window), !model.playerDownloadsOpen {
+                navigation.clear()
+                switch direction {
+                case .left: model.player.seek(model.player.position - 5)
+                case .right: model.player.seek(model.player.position + 5)
+                case .down: model.player.setVolume(model.player.volume - 5)
+                case .up: model.player.setVolume(model.player.volume + 5)
+                }
+                NotificationCenter.default.post(name: .yoruPlaybackActivity, object: nil)
+                return true
+            }
+            if flags.contains(.option) { return false }
+            if main, flags.contains(.shift), model.tab == .library, !direction.vertical {
+                let episodes = model.seasonEpisodes
+                guard !episodes.isEmpty else { return false }
+                let index = episodes.firstIndex { $0.id == model.libraryEpisodeFocus } ?? 0
+                let next = max(0, min(episodes.count - 1, index + Int(direction.sign)))
                 model.selectEpisodeRange(through: episodes[next])
                 return true
             }
-            switch code {
-            case 125: model.select(list[min(list.count - 1, index + 1)].id)
-            case 126: model.select(list[max(0, index - 1)].id)
-            case 123 where !episodes.isEmpty: model.libraryEpisodeFocus = episodes[max(0, ep - 1)].id
-            case 124 where !episodes.isEmpty: model.libraryEpisodeFocus = episodes[min(episodes.count - 1, ep + 1)].id
-            case 36 where !episodes.isEmpty && model.episodeSelection.isEmpty: model.play(episodes[ep])
-            default: return false
-            }
-            return true
+            return navigate(.move(direction), in: window)
         }
+        guard !(window.firstResponder is NSTextView) else { return false }
+        if code == 36 || code == 76 { return navigate(.activate, in: window) }
+        guard main, !model.settings, !flags.contains(.option) else { return false }
         guard model.tab == .player, model.current != nil else { return false }
         NotificationCenter.default.post(name: .yoruPlaybackActivity, object: nil)
-        switch code {
+        switch event.keyCode {
         case 49: model.player.toggle()
-        case 123: model.player.seek(model.player.position - 5)
-        case 124: model.player.seek(model.player.position + 5)
-        case 125: model.player.setVolume(model.player.volume - 5)
-        case 126: model.player.setVolume(model.player.volume + 5)
         default:
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "f": NSApp.keyWindow?.toggleFullScreen(nil)
-            case "d": model.openPlayerDownloads()
+            case "d" where usage?.hasDownloads == true: model.openPlayerDownloads()
             case "c":
                 if event.modifierFlags.contains(.shift) {
                     NotificationCenter.default.post(name: .yoruSubtitleOptions, object: nil)
@@ -491,6 +745,15 @@ struct RootView: View {
         guard let flag = arguments.firstIndex(of: "--self-test"), flag + 1 < arguments.count else { return }
         let url = URL(fileURLWithPath: arguments[flag + 1])
         Task {
+            if arguments.contains("--test-services") {
+                do {
+                    let entries = try await Catalog.lookup("Frieren")
+                    let items = try await TorrentSearch.search("Judas", groups: "Judas", minimumSeeds: 1, packs: false, episode: nil, season: nil)
+                    guard let item = items.first, !entries.isEmpty else { exit(2) }
+                    let view = try await TorrentSearch.preview(item)
+                    print("SERVICES anilist=\(entries.count) nyaa=\(items.count) verified=\(view.files.count)")
+                } catch { print("SERVICES \(error)"); exit(2) }
+            }
             NSApp.activate(ignoringOtherApps: true)
             if arguments.contains("--test-ending") {
                 for _ in 0..<16 where !model.libraryReady { try? await Task.sleep(nanoseconds: 100_000_000) }
@@ -550,10 +813,10 @@ struct RootView: View {
                             NSApp.postEvent(event, atStart: false)
                         }
                     }
-                    move(16)
+                    move(content.bounds.height * 0.43)
                     try? await Task.sleep(nanoseconds: 320_000_000)
                     let headerShown = fullscreenHeader
-                    move(160)
+                    move(content.bounds.height * 0.75)
                     try? await Task.sleep(nanoseconds: 320_000_000)
                     guard headerShown, !fullscreenHeader else { print("FULLSCREEN NAV failed"); exit(13) }
                     print("FULLSCREEN NAV revealed and dismissed")
@@ -579,13 +842,15 @@ struct RootView: View {
 }
 
 struct LibraryView: View {
+    @Environment(\.miniPlaybackClearance) private var miniPlaybackClearance
     @ObservedObject var model: Model
+    @Binding var backdrop: URL?
+    let navigationClearance: CGFloat
     @Environment(\.yoruTheme) private var theme
     @Environment(\.yoruLabels) private var labels
     @State private var editShow: Series?
     @State private var planSheet = false
     @State private var plannedTitle = ""
-    @State private var backdrop: URL?
     @State private var seasonCover: URL?
     @State private var episodeFrames: [String: CGRect] = [:]
     @State private var episodeSweep: EpisodeSweep?
@@ -611,72 +876,77 @@ struct LibraryView: View {
     var body: some View {
         GeometryReader { geometry in
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 15) {
-                HStack {
-                    SectionHeading(title: "Bibliothèque", compact: true)
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 7) {
+                    Text(labels("Bibliothèque")).font(YoruTypography.display(27))
+                        .accessibilityAddTraits(.isHeader).lineLimit(1).minimumScaleFactor(0.88)
                     Spacer()
-                    Button { plannedTitle = ""; planSheet = true } label: { Image(systemName: "plus") }.buttonStyle(ControlStyle()).help("Ajouter une série à regarder")
+                    Button { plannedTitle = ""; planSheet = true } label: { Image(systemName: "plus") }
+                        .buttonStyle(ControlStyle(horizontalPadding: 11)).accessibilityLabel("Ajouter une série à regarder")
+                    Button { model.refresh() } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(ControlStyle(horizontalPadding: 11)).accessibilityLabel("Actualiser")
                 }
-                HStack {
-                    SearchField(title: "Rechercher", value: $model.filter, icon: "magnifyingglass")
-                        .onChange(of: model.filter) { _ in if model.selectedSeries == nil { model.select(model.displayed.first?.id) } }
-                    Button { model.refresh() } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(ControlStyle()).help("Actualiser")
-                }
-                HStack(spacing: 4) {
+                SearchField(title: "Rechercher", value: $model.filter, icon: "magnifyingglass")
+                    .onChange(of: model.filter) { _ in if model.selectedSeries == nil { model.select(model.displayed.first?.id) } }
+                HStack(spacing: 6) {
                     ForEach(Model.LibraryFilter.allCases) { filter in
-                        Button(labels(filter.rawValue)) { model.selectLibraryFilter(filter) }
-                            .buttonStyle(ControlStyle(selected: model.libraryFilter == filter, horizontalPadding: 9))
+                        Button { model.selectLibraryFilter(filter) } label: {
+                            Text(labels(filter.rawValue)).lineLimit(1).frame(maxWidth: .infinity)
+                        }
+                            .buttonStyle(ControlStyle(selected: model.libraryFilter == filter, horizontalPadding: 5))
                             .accessibilityAddTraits(model.libraryFilter == filter ? .isSelected : [])
                     }
                 }
                 ScrollViewReader { proxy in
                     ScrollView {
-                        LazyVStack(spacing: 5) {
+                        LazyVStack(spacing: 8) {
                             ForEach(model.displayed) { item in
                                 Button { model.select(item.id) } label: {
-                                    HStack(spacing: 10) {
-                                        AnimeCover(title: item.query, id: model.state.shows[item.id]?.aniListID, preview: item.episodes.first, width: 40, height: 55)
+                                    HStack(spacing: 12) {
+                                        AnimeCover(title: item.query, id: model.state.shows[item.id]?.aniListID, preview: item.episodes.first, width: 46, height: 62)
                                         VStack(alignment: .leading, spacing: 5) {
-                                            Text(item.title).font(YoruTypography.text(17, strong: true)).lineLimit(3)
+                                            Text(item.title).font(YoruTypography.text(17, strong: true)).lineLimit(2)
                                             let total = item.episodes.count
                                             let watched = item.episodes.filter { model.progress($0).watched }.count
                                             Text(labels(total == 0 ? "À voir" : total == 1 && item.episodes.first?.number == nil ? "Vidéo" : "\(watched) / \(total) vus"))
                                                 .font(YoruTypography.text(14)).foregroundStyle(theme.mutedText)
                                         }
                                         Spacer(minLength: 4)
-                                        if let score = model.score(item) { Text(score.formatted()).font(.system(size: 12, weight: .medium)).foregroundStyle(theme.accent) }
+                                        if let score = model.score(item) { Text(score.formatted()).font(YoruTypography.text(14, strong: true)).foregroundStyle(theme.accent) }
                                     }
-                                    .padding(.horizontal, 9).padding(.vertical, 8)
-                                    .background(model.selected == item.id ? theme.tint : Color.clear, in: RoundedRectangle(cornerRadius: 13))
+                                    .padding(.horizontal, 10).padding(.vertical, 9)
+                                    .background(model.selected == item.id ? theme.tint : Color.clear, in: RoundedRectangle(cornerRadius: 16))
                                     .overlay(alignment: .leading) {
                                         if model.selected == item.id { Capsule().fill(theme.accent).frame(width: 2, height: 21).allowsHitTesting(false) }
                                     }
                                     .contentShape(Rectangle())
-                                }.buttonStyle(.plain).id(item.id)
+                                }.buttonStyle(DirectionalPlainStyle(radius: 16, priority: model.selected == item.id ? 2 : 0)).id(item.id)
                                     .accessibilityAddTraits(model.selected == item.id ? .isSelected : [])
+                                    .animation(motion, value: model.selected)
                             }
                             if model.displayed.isEmpty {
                                 Text(labels(model.filter.trimmed.isEmpty ? "Aucune série ici" : "Aucun résultat"))
                                     .font(YoruTypography.text(15)).foregroundStyle(theme.mutedText)
                                     .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 9)
                             }
-                        }
+                        }.padding(4)
                     }
                     .onChange(of: model.selected) { id in if let id { proxy.scrollTo(id) } }
                 }
-                Text(model.folder.path.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~"))
-                    .font(.caption).foregroundStyle(theme.mutedText).lineLimit(1)
+                Label((model.folder.path as NSString).abbreviatingWithTildeInPath, systemImage: "folder")
+                    .font(YoruTypography.text(13)).foregroundStyle(theme.mutedText).lineLimit(1)
             }
-            .padding(15).frame(width: min(350, max(239, geometry.size.width * 0.25)))
+            .padding(17).frame(width: min(374, max(288, geometry.size.width * 0.29)))
             .modifier(Glass(radius: 27, tint: theme.card.opacity(0.3), fallback: theme.card))
             .padding(.leading, 13).padding(.vertical, 7)
+            .padding(.top, navigationClearance)
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 19) {
                         if let show = model.selectedSeries {
                             title(show)
                             metadata(show)
-                            if let offer = model.suggestedSeason, offer.showID == show.id,
+                            if model.allowsDownloads, let offer = model.suggestedSeason, offer.showID == show.id,
                                model.librarySeason == nil || model.librarySeason == offer.current {
                                 SeasonOfferCard(offer: offer, model: model)
                             }
@@ -705,18 +975,18 @@ struct LibraryView: View {
                             }.padding(.vertical, 45)
                         }
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(geometry.size.width > 1250 ? 34 : 23)
-                        .padding(.bottom, model.episodeSelection.isEmpty && model.watchUndoCount == 0 ? 0 : 100)
+                        .padding(.top, navigationClearance)
+                        .padding(.bottom, miniPlaybackClearance + (model.episodeSelection.isEmpty && model.watchUndoCount == 0 ? 0 : 100))
                 }.onChange(of: model.libraryEpisodeFocus) { id in if let id { proxy.scrollTo(id) } }
-                    .overlay(alignment: .bottom) { selectionBar }
+                    .overlay(alignment: .bottom) { selectionBar.padding(.bottom, miniPlaybackClearance) }
                     .animation(motion, value: !model.episodeSelection.isEmpty || model.watchUndoCount > 0)
             }
         }
-        .background { ArtBackdrop(url: backdrop) }
         }
         .task(id: (model.selected ?? "") + "|" + String(model.librarySeason ?? 0) + "|" + String(model.selected.flatMap { model.state.shows[$0]?.aniListID } ?? 0)) {
             backdrop = nil
             seasonCover = nil
-            guard let show = model.selectedSeries else { backdrop = nil; seasonCover = nil; return }
+            guard let show = model.selectedSeries else { return }
             let id = model.state.shows[show.id]?.aniListID
             let season = await ArtworkCatalog.shared.season(model.librarySeason ?? 1, title: show.query, id: id)
             let art: Anime?
@@ -741,7 +1011,7 @@ struct LibraryView: View {
         .sheet(isPresented: $planSheet) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Ajouter à regarder").font(.title2.bold())
-                TextField("Titre de la série", text: $plannedTitle).textFieldStyle(.roundedBorder)
+                DirectionalTextField(title: "Titre de la série", text: $plannedTitle).textFieldStyle(.roundedBorder)
                 HStack {
                     Spacer()
                     Button("Annuler") { planSheet = false }.keyboardShortcut(.cancelAction)
@@ -874,10 +1144,12 @@ struct LibraryView: View {
                         }.buttonStyle(ControlStyle(accent: true))
                             .help(resume.map { $0.display + " · " + formatTime(model.progress($0).seconds) } ?? first.display)
                     }
-                    Button { model.downloadLibrarySeason(show) } label: {
-                        Label(labels("Télécharger"), systemImage: "arrow.down.to.line")
-                    }.buttonStyle(ControlStyle()).disabled(model.addingTorrent)
-                        .contextMenu { Button(labels("Choisir une version")) { model.findDownloads(show) } }
+                    if model.allowsDownloads {
+                        Button { model.downloadLibrarySeason(show) } label: {
+                            DownloadLabel(title: labels("Télécharger"))
+                        }.buttonStyle(ControlStyle()).disabled(model.addingTorrent)
+                            .contextMenu { Button(labels("Choisir une version")) { model.findDownloads(show) } }
+                    }
                     Button {
                         model.updateShow(show.id) { $0.watchlist.toggle() }
                         if model.selectedSeries == nil { model.select(model.displayed.first?.id) }
@@ -936,7 +1208,7 @@ struct LibraryView: View {
                             CoverArt(url: edge.node.coverImage?.large, width: 24, height: 33, radius: 4)
                             Label((["SEQUEL": "Suite", "SPIN_OFF": "Spin-off", "PREQUEL": "Précédent", "SIDE_STORY": "Histoire annexe"][edge.relationType] ?? "") + " · " + (edge.node.title.romaji ?? edge.node.title.english ?? ""), systemImage: "arrow.up.right")
                         }
-                    }.buttonStyle(.plain).foregroundStyle(theme.mutedText).font(.callout)
+                    }.buttonStyle(DirectionalPlainStyle()).foregroundStyle(theme.mutedText).font(.callout)
                     .contextMenu {
                         Button("Ajouter à regarder") {
                             if let title = edge.node.title.romaji ?? edge.node.title.english {
@@ -948,12 +1220,17 @@ struct LibraryView: View {
             }
         } else if model.matches.isEmpty {
             Button(model.metadataBusy ? "Recherche…" : "Voir les suites et prochaines sorties") { model.metadata(for: show) }
-                .buttonStyle(.plain).foregroundStyle(theme.accent).disabled(model.metadataBusy)
+                .buttonStyle(DirectionalPlainStyle()).foregroundStyle(theme.accent).disabled(model.metadataBusy)
         }
         if !model.matches.isEmpty {
-            Menu("Associer à une fiche AniList") {
-                ForEach(model.matches) { result in Button(result.name) { model.assign(result, to: show) } }
-            }.fixedSize()
+            DirectionalMenu {
+                Text(labels("Associer à une fiche AniList"))
+            } actions: { close in
+                ForEach(model.matches) { result in
+                    Button(result.name) { close(); model.assign(result, to: show) }
+                        .buttonStyle(ControlStyle())
+                }
+            }
         }
     }
 
@@ -1017,7 +1294,7 @@ struct LibraryView: View {
                 .allowsHitTesting(false))
             .contentShape(Rectangle())
         }
-            .buttonStyle(.plain)
+            .buttonStyle(DirectionalPlainStyle(onFocus: { model.libraryEpisodeFocus = episode.id }))
             .accessibilityLabel(action + " · " + episode.display)
             .accessibilityValue(status.watched ? "Vu" : status.seconds > 3 ? "Reprendre à " + formatTime(status.seconds) : "")
             .animation(reduceMotion || lightweight ? nil : YoruMotion.selection, value: selected)
@@ -1054,10 +1331,10 @@ struct EditShow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Modifier la fiche").font(.title.bold())
-            TextField("Titre affiché", text: $title)
-            TextField("Nom pour la recherche", text: $query)
-            TextField("Note sur 10", text: $rating)
-            TextField("Lien Nautiljon", text: $link)
+            DirectionalTextField(title: "Titre affiché", text: $title)
+            DirectionalTextField(title: "Nom pour la recherche", text: $query)
+            DirectionalTextField(title: "Note sur 10", text: $rating)
+            DirectionalTextField(title: "Lien Nautiljon", text: $link)
             HStack {
                 Spacer()
                 Button("Annuler") { dismiss() }.keyboardShortcut(.cancelAction)

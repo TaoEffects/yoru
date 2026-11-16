@@ -181,8 +181,10 @@ final class VideoSurface: NSView {
 
 struct VideoView: NSViewRepresentable {
     let player: Player
-    func makeNSView(context: Context) -> NSView { player.surface }
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func makeCoordinator() -> PictureInPicture { player.pictureInPicture }
+    func makeNSView(context: Context) -> VideoHostView { VideoHostView() }
+    func updateNSView(_ host: VideoHostView, context: Context) { context.coordinator.attachInlineHost(host) }
+    static func dismantleNSView(_ host: VideoHostView, coordinator: PictureInPicture) { coordinator.detachInlineHost(host) }
 }
 
 final class Player: ObservableObject {
@@ -197,6 +199,9 @@ final class Player: ObservableObject {
     private var ready = false
     private var reportedEnd = false
     private var correctedDuration: Double?
+    private let audioDevicesObservation: UInt64 = 1
+    private var failedAudioOutput: String?
+    @MainActor lazy var pictureInPicture = PictureInPicture(player: self)
 
     @Published var position = 0.0
     @Published var duration = 0.0
@@ -205,10 +210,14 @@ final class Player: ObservableObject {
     @Published var tracks: [Track] = []
     @Published var activeSubtitle: Int?
     @Published var activeAudio: Int?
+    @Published private(set) var audioOutputs = [AudioOutput.system]
+    @Published private(set) var preferredAudioOutput = UserDefaults.standard.string(forKey: "audioOutputDevice") ?? AudioOutput.system.id
+    @Published private(set) var configuredAudioOutput = AudioOutput.system.id
     @Published var delay = 0.0
     @Published var skips: [SkipSegment] = []
     @Published var error = ""
     @Published var loaded = false
+    @Published private(set) var pictureInPictureActive = false
     private var loop: ClosedRange<Double>?
 
     init() {
@@ -218,6 +227,7 @@ final class Player: ObservableObject {
             for (key, value) in [
                 "vo": "libmpv", "config": "no", "idle": "yes", "hwdec": "auto-safe",
                 "volume": "80", "alang": "jpn,ja", "sid": "no", "audio-device": "auto",
+                "audio-fallback-to-null": "yes",
                 "sub-auto": "fuzzy", "load-scripts": "no", "ytdl": "no", "keep-open": "yes",
                 "osd-level": "0", "input-default-bindings": "no"
             ] { mpv_set_option_string(handle, key, value) }
@@ -225,6 +235,10 @@ final class Player: ObservableObject {
         } else { error = "Moteur vidéo indisponible." }
         surface = VideoSurface(engine: handle)
         if let renderError = surface.error { error = renderError }
+        if let handle {
+            mpv_observe_property(handle, audioDevicesObservation, "audio-device-list", MPV_FORMAT_NONE)
+            refreshAudioOutputs()
+        }
         frames = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.surface.frameIfNeeded() }
         clock = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in self?.tick() }
         if let frames, let clock {
@@ -285,7 +299,8 @@ final class Player: ObservableObject {
         command(["seek", String(max(0, min(seconds, duration))), "absolute+exact"])
     }
 
-    func stop() {
+    @MainActor func stop() {
+        stopPictureInPicture(restore: false)
         command(["stop"])
         ready = false
         loaded = false
@@ -295,6 +310,22 @@ final class Player: ObservableObject {
         tracks = []
         error = ""
     }
+
+    @MainActor func startPictureInPicture(title: String, restore: @escaping () -> Void) {
+        pictureInPicture.start(title: title, restore: restore)
+    }
+
+    @MainActor func stopPictureInPicture(restore: Bool = true) {
+        if pictureInPictureActive { pictureInPicture.stop(restore: restore) }
+    }
+
+    func setPictureInPictureActive(_ active: Bool) { pictureInPictureActive = active }
+
+    var displayAspectRatio: CGSize {
+        guard let width = property("dwidth").flatMap(Double.init), let height = property("dheight").flatMap(Double.init),
+              width > 0, height > 0, (0.2...5).contains(width / height) else { return CGSize(width: 16, height: 9) }
+        return CGSize(width: width, height: height)
+    }
     func toggle() {
         if reportedEnd { seek(0); reportedEnd = false; set("pause", "no"); return }
         set("pause", paused ? "no" : "yes")
@@ -303,6 +334,42 @@ final class Player: ObservableObject {
     func subtitles(_ id: Int?) { activeSubtitle = id; set("sid", id.map(String.init) ?? "no") }
     func audio(_ id: Int) { set("aid", String(id)); activeAudio = id }
     func setDelay(_ value: Double) { delay = value; set("sub-delay", String(value)) }
+
+    func chooseAudioOutput(_ output: AudioOutput) {
+        guard audioOutputs.contains(where: { $0.id == output.id }) else { return }
+        if preferredAudioOutput != output.id {
+            preferredAudioOutput = output.id
+            UserDefaults.standard.set(output.id, forKey: "audioOutputDevice")
+        }
+        failedAudioOutput = nil
+        applyAudioOutput()
+    }
+
+    private func refreshAudioOutputs() {
+        guard let count = property("audio-device-list/count").flatMap(Int.init), count > 0 else { return }
+        var seen = Set<String>()
+        var devices: [AudioOutput] = []
+        for index in 0..<count {
+            let path = "audio-device-list/\(index)"
+            guard let id = property("\(path)/name"), id.hasPrefix("coreaudio/"), seen.insert(id).inserted,
+                  let name = property("\(path)/description"), !name.isEmpty else { continue }
+            devices.append(AudioOutput(id: id, name: name))
+        }
+        let outputs = [AudioOutput.system] + devices.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        if outputs != audioOutputs { audioOutputs = outputs }
+        if let failedAudioOutput, !seen.contains(failedAudioOutput) { self.failedAudioOutput = nil }
+        applyAudioOutput()
+    }
+
+    private func applyAudioOutput() {
+        guard let engine else { return }
+        let requested = audioOutputs.contains { $0.id == preferredAudioOutput } && failedAudioOutput != preferredAudioOutput
+            ? preferredAudioOutput : AudioOutput.system.id
+        guard requested != configuredAudioOutput else { return }
+        if mpv_set_property_string(engine, "audio-device", requested) >= 0 {
+            configuredAudioOutput = requested
+        }
+    }
 
     func addSubtitle(_ url: URL, language: String? = nil) {
         if command(["sub-add", url.path, "select", language.map { $0.uppercased() } ?? "", language ?? ""]) < 0 {
@@ -364,8 +431,37 @@ final class Player: ObservableObject {
         return real
     }
 
-    func subtitleClearance(_ enabled: Bool) {
-        set("sub-pos", enabled ? "89" : "100")
+    private var subtitlePosition = 100.0
+    private var subtitleDestination = 100.0
+    private var subtitleMotion: Task<Void, Never>?
+
+    func subtitleClearance(_ height: CGFloat, animated: Bool = true) {
+        let viewHeight = surface.bounds.height
+        let shift = viewHeight > 0 ? Double(height / viewHeight) * 100 : 0
+        let target = 100 - min(30, max(0, shift))
+        guard abs(target - subtitleDestination) > 0.12 || (!animated && target != subtitlePosition) else { return }
+        subtitleMotion?.cancel()
+        subtitleDestination = target
+        if !animated {
+            subtitlePosition = target
+            set("sub-pos", String(target))
+            return
+        }
+
+        let start = subtitlePosition
+        subtitleMotion = Task { @MainActor [weak self] in
+            for step in 1...14 {
+                try? await Task.sleep(nanoseconds: 16_000_000)
+                guard !Task.isCancelled, let self else { return }
+                let t = Double(step) / 14
+                let eased = t * t * (3 - 2 * t)
+                let value = start + (target - start) * eased
+                if abs(value - self.subtitlePosition) > 0.035 || step == 14 {
+                    self.subtitlePosition = value
+                    self.set("sub-pos", String(value))
+                }
+            }
+        }
     }
 
     private func readChapters() {
@@ -410,8 +506,12 @@ final class Player: ObservableObject {
                     error = "Lecture interrompue · \(String(cString: mpv_error_string(result?.error ?? -1)))"
                 }
             case MPV_EVENT_AUDIO_RECONFIG:
-                // CoreAudio follows the default device when audio-device is auto.
-                break
+                if configuredAudioOutput != AudioOutput.system.id, property("current-ao") == "null" {
+                    failedAudioOutput = configuredAudioOutput
+                    applyAudioOutput()
+                }
+            case MPV_EVENT_PROPERTY_CHANGE where event.pointee.reply_userdata == audioDevicesObservation:
+                refreshAudioOutputs()
             default: break
             }
         }

@@ -11,6 +11,8 @@ import UniformTypeIdentifiers
     let player = Player()
     let torrent = TorrentClient()
     @Published var tab = Tab.home
+    @Published var presentedAnime: AnimePresentation?
+    @Published var watchlistOpen = false
     @Published var series: [Series] = []
     @Published private(set) var libraryReady = false
     @Published var selected: String?
@@ -90,6 +92,7 @@ import UniformTypeIdentifiers
     private var requestedEpisode: Int?
     private var scanCount = 0
     private let selfTest = CommandLine.arguments.contains("--self-test")
+    var allowsDownloads: Bool { selfTest || YoruUsageMode.current.hasDownloads }
     private var store: URL { FileManager.support.appendingPathComponent("Bibliothèque.json") }
 
     var folder: URL {
@@ -235,7 +238,7 @@ import UniformTypeIdentifiers
     var suggestedSeason: SeasonOffer? { (current ?? latestFollowedEpisode).flatMap(seasonOffer(for:)) }
 
     func checkFollowingSeason(_ episode: Episode? = nil) {
-        guard !selfTest, let point = episode ?? latestFollowedEpisode, point.number != nil,
+        guard allowsDownloads, !selfTest, let point = episode ?? latestFollowedEpisode, point.number != nil,
               let show = series.first(where: { $0.id == point.showID }) else { return }
         let season = point.season ?? 1
         let key = show.id + "|" + String(season)
@@ -325,7 +328,7 @@ import UniformTypeIdentifiers
             let firstScan = !libraryReady
             libraryReady = true
             updateNautiljonRecommendationsIfNeeded()
-            if firstScan {
+            if firstScan, allowsDownloads {
                 Task { await checkTransfers(force: true) }
             }
             checkFollowingSeason()
@@ -413,25 +416,10 @@ import UniformTypeIdentifiers
             var excluded = seen
             var items: [Discovery] = []
             let queue = Array(candidates.prefix(36))
-            for start in stride(from: 0, to: queue.count, by: 4) {
-                let matches = await withTaskGroup(of: (Int, Anime?).self) { group in
-                    for index in start..<min(start + 4, queue.count) {
-                        let row = queue[index]
-                        group.addTask {
-                            for title in row.titles.prefix(2) {
-                                if let anime = await ArtworkCatalog.shared.match(title), !anime.titleKeys.isDisjoint(with: row.keys) {
-                                    return (index, anime)
-                                }
-                            }
-                            return (index, nil)
-                        }
-                    }
-                    var result: [(Int, Anime?)] = []
-                    for await item in group { result.append(item) }
-                    return result.sorted { $0.0 < $1.0 }
-                }
-                guard !Task.isCancelled else { return }
-                for (_, match) in matches {
+            for start in stride(from: 0, to: queue.count, by: 6) {
+                let batch = Array(queue[start..<min(start + 6, queue.count)])
+                guard let matches = try? await Catalog.matchWatchlist(batch, details: true), !Task.isCancelled else { break }
+                for match in matches {
                     guard let anime = match, anime.status != "NOT_YET_RELEASED", anime.status != "CANCELLED",
                           anime.titleKeys.isDisjoint(with: excluded) else { continue }
                     excluded.formUnion(anime.titleKeys)
@@ -456,16 +444,22 @@ import UniformTypeIdentifiers
         }
     }
 
-    func openWatchlistTitle(_ row: NautiljonTitle) {
-        if let recommendation = nautiljonRecommendations.first(where: { !$0.entry.titleKeys.isDisjoint(with: row.keys) }) {
-            downloadRecommendation(recommendation)
-        } else if let title = row.titles.first {
-            searchRecommendation(title: title)
-        }
+    func openWatchlistTitle(_ row: NautiljonTitle, entry: Anime?) {
+        presentedAnime = AnimePresentation(names: row.titles, entry: entry)
+    }
+
+    func present(_ item: Discovery) {
+        presentedAnime = AnimePresentation(names: [item.entry.name], entry: item.entry)
+    }
+
+    func downloadPresentedAnime(_ presentation: AnimePresentation, entry: Anime?) {
+        if let season = presentation.season { downloadSeason(season) }
+        else if let entry { downloadRecommendation(Discovery(entry: entry, reason: nil)) }
+        else { searchRecommendation(title: presentation.title) }
     }
 
     private func updateNautiljonRecommendationsIfNeeded() {
-        guard !(state.nautiljonWatchlist ?? []).isEmpty,
+        guard allowsDownloads, !(state.nautiljonWatchlist ?? []).isEmpty,
               nautiljonRecommendationExclusions != nautiljonExcludedTitles || nautiljonTask == nil else { return }
         loadNautiljonRecommendations()
     }
@@ -959,7 +953,7 @@ import UniformTypeIdentifiers
 
     private var recommendationBasis: String?
     func discover() async {
-        guard libraryReady, !selfTest, !recommending else { return }
+        guard allowsDownloads, libraryReady, !selfTest, !recommending else { return }
         let known = series.compactMap { show -> (Series, Double)? in
             let watched = show.episodes.filter { progress($0).watched }.count
             guard watched > 0 else { return nil }
@@ -1003,6 +997,7 @@ import UniformTypeIdentifiers
     }
 
     private func searchRecommendation(title: String) {
+        presentedAnime = nil
         downloadSeries = nil
         search = title
         requestedEpisode = nil
@@ -1072,6 +1067,7 @@ import UniformTypeIdentifiers
                 let transferScope = showID + "|" + String(number)
                 await checkTransfers(force: true)
                 if activeTransfers.contains(where: { !$0.state.contains("error") && state.transferSeasons?[$0.id] == transferScope }) {
+                    presentedAnime = nil
                     downloadPane = .transfers
                     if inPlayer, tab == .player { playerDownloadsOpen = true }
                     else { tab = .downloads }
@@ -1156,6 +1152,7 @@ import UniformTypeIdentifiers
                 if succeeded == 0 { throw firstError ?? Notice("Le téléchargement n’a pas démarré.") }
                 state.downloadFolders = (state.downloadFolders ?? [:]).merging([safeName: showID]) { _, latest in latest }
                 persist()
+                presentedAnime = nil
                 downloadPane = .transfers
                 if inPlayer, tab == .player { playerDownloadsOpen = true }
                 else if tab == .home || tab == .library { tab = .downloads }
@@ -1192,6 +1189,7 @@ import UniformTypeIdentifiers
     }
 
     func openPlayerDownloads() {
+        guard allowsDownloads else { return }
         if playerDownloadsOpen { closePlayerDownloads(); return }
         playerDownloadsOpen = true
         downloadPane = activeTransfers.isEmpty && availableDownloads.isEmpty ? .search : .transfers
@@ -1216,13 +1214,13 @@ import UniformTypeIdentifiers
     }
 
     func openFiles(_ urls: [URL]) {
-        if let torrent = urls.first(where: { $0.isFileURL && $0.pathExtension.lowercased() == "torrent" }) {
+        if allowsDownloads, let torrent = urls.first(where: { $0.isFileURL && $0.pathExtension.lowercased() == "torrent" }) {
             importTorrent(torrent)
         } else { openURLs(urls) }
     }
 
     func importTorrent(_ url: URL) {
-        guard !addingTorrent else { return }
+        guard allowsDownloads, !addingTorrent else { return }
         if tab == .player { playerDownloadsOpen = true }
         else { tab = .downloads }
         downloadPane = .search

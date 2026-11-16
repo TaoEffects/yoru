@@ -31,6 +31,13 @@ enum Vault {
 }
 
 enum HTTP {
+    struct Status: LocalizedError {
+        let host: String
+        let code: Int
+        let retryAfter: Int?
+        var errorDescription: String? { "\(host) indisponible (HTTP \(code))." }
+    }
+
     static func endpoint(_ url: String, _ query: [String: String] = [:]) -> URL {
         var components = URLComponents(string: url)!
         if !query.isEmpty { components.queryItems = query.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) } }
@@ -43,8 +50,11 @@ enum HTTP {
         headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
         if let body { request.httpMethod = "POST"; request.httpBody = body }
         let (data, response) = try await session.data(for: request)
-        guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
-            throw Notice("\(url.host ?? "Service") indisponible (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)).")
+        let status = response as? HTTPURLResponse
+        let code = status?.statusCode ?? 0
+        guard (200..<300).contains(code) else {
+            let delay = status?.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init)
+            throw Status(host: url.host ?? "Service", code: code, retryAfter: delay)
         }
         guard data.count <= limit else { throw Notice("Réponse trop volumineuse.") }
         return data
@@ -60,6 +70,12 @@ struct Anime: Decodable, Identifiable, Equatable {
     struct Title: Decodable, Equatable { var romaji: String?; var english: String?; var native: String? }
     struct Cover: Decodable, Equatable { var large: URL?; var color: String? }
     struct Next: Decodable, Equatable { var episode: Int; var airingAt: Double }
+    struct Tag: Decodable, Equatable {
+        var name: String
+        var rank: Int?
+        var isMediaSpoiler: Bool?
+        var isGeneralSpoiler: Bool?
+    }
     struct Relations: Decodable, Equatable {
         struct Edge: Decodable, Equatable {
             struct Node: Decodable, Equatable { var id: Int; var title: Title; var type: String; var coverImage: Cover?; var format: String?; var status: String? }
@@ -78,9 +94,25 @@ struct Anime: Decodable, Identifiable, Equatable {
     var bannerImage: URL?
     var title: Title
     var episodes: Int?
+    var description: String?
+    var averageScore: Int?
+    var genres: [String]?
+    var tags: [Tag]?
     var nextAiringEpisode: Next?
     var relations: Relations?
     var name: String { title.romaji ?? title.english ?? title.native ?? "Anime \(id)" }
+    var isFilm: Bool { format == "MOVIE" }
+    var synopsis: String? {
+        description?
+            .replacingPattern(#"(?i)<br\s*/?>\s*"#, with: "\n")
+            .replacingPattern(#"(?i)</p\s*>"#, with: "\n\n")
+            .replacingPattern(#"<[^>]+>"#)
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#039;", with: "’")
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .trimmed
+    }
     var titleKeys: Set<String> {
         let names = [title.romaji, title.english, title.native].compactMap { $0 } + (synonyms ?? [])
         return Set(names.map(\.normalized).filter { !$0.isEmpty })
@@ -88,6 +120,9 @@ struct Anime: Decodable, Identifiable, Equatable {
 }
 
 enum Catalog {
+    private static let profileFields = "id format status idMal episodes title { romaji english native } synonyms coverImage { large color } bannerImage nextAiringEpisode { episode airingAt }"
+    private static let summaryFields = "description(asHtml: true) averageScore"
+    private static let detailFields = "genres tags { name rank isMediaSpoiler isGeneralSpoiler }"
     private struct Envelope: Decodable {
         struct Result: Decodable {
             struct Page: Decodable { var media: [Anime] }
@@ -97,8 +132,9 @@ enum Catalog {
         var data: Result?
     }
 
-    static func lookup(_ title: String, id: Int? = nil) async throws -> [Anime] {
+    static func lookup(_ title: String, id: Int? = nil, details: Bool = false) async throws -> [Anime] {
         let fields = "id idMal format status countryOfOrigin synonyms title { romaji english native } coverImage { large color } bannerImage episodes nextAiringEpisode { episode airingAt } relations { edges { relationType node { id title { romaji english native } type format status coverImage { large color } } } }"
+            + (details ? " \(summaryFields) \(detailFields)" : "")
         let query = id == nil
             ? "query($query: String!) { Page(perPage: 6) { media(search: $query, type: ANIME) { \(fields) } } }"
             : "query($id: Int!) { Media(id: $id, type: ANIME) { \(fields) } }"
@@ -111,8 +147,43 @@ enum Catalog {
         return result.Page?.media ?? result.Media.map { [$0] } ?? []
     }
 
+    static func matchWatchlist(_ rows: [NautiljonTitle], details: Bool = false) async throws -> [Anime?] {
+        let entries = try await lookupWatchlist(rows.map { $0.titles.first ?? "" }, details: details)
+        var matches = zip(rows, entries).map { row, candidates in
+            candidates.first { !$0.titleKeys.isDisjoint(with: row.keys) }
+        }
+        for titleIndex in 1..<(max(1, rows.map(\.titles.count).max() ?? 1)) {
+            let alternatives = rows.indices.filter { matches[$0] == nil && rows[$0].titles.indices.contains(titleIndex) }
+            guard !alternatives.isEmpty else { continue }
+            try Task.checkCancellation()
+            let candidates = try await lookupWatchlist(alternatives.map { rows[$0].titles[titleIndex] }, details: details)
+            for (index, entries) in zip(alternatives, candidates) {
+                matches[index] = entries.first { !$0.titleKeys.isDisjoint(with: rows[index].keys) }
+            }
+        }
+        return matches
+    }
+
+    private static func lookupWatchlist(_ names: [String], details: Bool) async throws -> [[Anime]] {
+        guard !names.isEmpty else { return [] }
+        let indices = Array(names.indices)
+        let declarations = indices.map { "$name\($0): String!" }.joined(separator: ", ")
+        let fields = details ? "\(profileFields) \(summaryFields) \(detailFields)" : profileFields
+        let selections = indices.map { "entry\($0): Page(perPage: 4) { media(search: $name\($0), type: ANIME) { \(fields) } }" }
+        let variables = Dictionary(uniqueKeysWithValues: indices.map { ("name\($0)", names[$0]) })
+        let body = try JSONSerialization.data(withJSONObject: [
+            "query": "query(\(declarations)) { \(selections.joined(separator: " ")) }", "variables": variables
+        ])
+        let data = try await HTTP.data(URL(string: "https://graphql.anilist.co")!,
+                                       headers: ["Content-Type": "application/json"], body: body)
+        struct Batch: Decodable { var data: [String: Envelope.Result.Page]? }
+        let result = try JSONDecoder().decode(Batch.self, from: data)
+        guard let entries = result.data else { throw Notice("AniList n’a pas renvoyé de fiches lisibles.") }
+        return indices.map { entries["entry\($0)"]?.media ?? [] }
+    }
+
     static func discover(basedOn id: Int?) async throws -> [Anime] {
-        let fields = "id format status episodes nextAiringEpisode { episode airingAt } title { romaji english native } synonyms coverImage { large color } bannerImage"
+        let fields = profileFields + " " + summaryFields
         let query: String
         let variables: [String: Any]
         if let id {
@@ -160,6 +231,38 @@ enum Catalog {
                   segment.endTime <= duration, (8...300).contains(segment.endTime - segment.startTime) else { return nil }
             return SkipSegment(kind: entry.skipType, start: segment.startTime, end: segment.endTime)
         }
+    }
+}
+
+enum ProfileEpisodes {
+    struct Episode: Identifiable {
+        let number: Int
+        let frenchTitle: String?
+        var id: Int { number }
+    }
+
+    private struct Feed: Decodable {
+        struct Mapping: Decodable { let anilistId: Int? }
+        struct Entry: Decodable { let title: [String: String]? }
+        let mappings: Mapping
+        let episodes: [String: Entry]?
+    }
+
+    static func list(for anime: Anime) async throws -> [Episode] {
+        guard !anime.isFilm, anime.status != "NOT_YET_RELEASED", anime.status != "CANCELLED" else { return [] }
+        let url = HTTP.endpoint("https://api.ani.zip/mappings", ["anilist_id": String(anime.id)])
+        let data = try await HTTP.data(url)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let feed = try decoder.decode(Feed.self, from: data)
+        guard feed.mappings.anilistId == anime.id else { return [] }
+        let aired = anime.status == "RELEASING" ? anime.nextAiringEpisode.map { $0.episode - 1 } : nil
+        let upperLimit = aired ?? anime.episodes ?? Int.max
+        return (feed.episodes ?? [:]).compactMap { key, episode -> Episode? in
+            guard let number = Int(key), number > 0, number <= upperLimit else { return nil }
+            let title = (episode.title?["fr"] ?? episode.title?["fr-FR"])?.trimmed.nonEmpty
+            return Episode(number: number, frenchTitle: title)
+        }.sorted { $0.number < $1.number }
     }
 }
 

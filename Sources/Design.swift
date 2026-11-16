@@ -1,9 +1,31 @@
 import SwiftUI
 import CoreText
 
+enum InterfaceDefaults {
+    static let theme = YoruTheme.creme
+    static let lowercase = false
+    static let inlinePlayerNavigation = false
+}
+
 enum PlayerTitleStyle: String, CaseIterable, Identifiable {
     case wordmark, japanese
     var id: Self { self }
+}
+
+enum PlaybackArrows: String, CaseIterable {
+    case hybrid, playback, navigation
+
+    var title: String {
+        switch self {
+        case .hybrid: return "Navigation en pause"
+        case .playback: return "Avance, recul et volume"
+        case .navigation: return "Navigation dans l’interface"
+        }
+    }
+
+    func controlsVideo(paused: Bool) -> Bool {
+        self == .playback || (self == .hybrid && !paused)
+    }
 }
 
 struct InterfaceLabels {
@@ -61,6 +83,9 @@ enum YoruTypography {
 enum YoruMotion {
     static let selection = Animation.spring(response: 0.30, dampingFraction: 0.82, blendDuration: 0.12)
     static let reveal = Animation.spring(response: 0.38, dampingFraction: 0.88, blendDuration: 0.15)
+    static let focus = Animation.spring(response: 0.29, dampingFraction: 0.80, blendDuration: 0.10)
+    static let pageChange = Animation.easeInOut(duration: 0.23)
+    static var page: AnyTransition { .opacity.combined(with: .offset(y: 7)) }
 }
 
 struct SearchField: View {
@@ -90,6 +115,7 @@ struct SearchField: View {
             .allowsHitTesting(false))
         .contentShape(Capsule())
         .onTapGesture { focused = true }
+        .directionalTarget(radius: 100) { focused = true }
         .animation(reduceMotion || lightweight ? nil : YoruMotion.selection, value: focused)
     }
 }
@@ -128,5 +154,13 @@ struct ProgressLine: View {
         }
         .frame(height: height)
         .accessibilityHidden(true)
+    }
+}
+
+
+extension View {
+    @ViewBuilder func playbackBounce<Value: Equatable>(_ value: Value, enabled: Bool) -> some View {
+        if #available(macOS 14, *), enabled { symbolEffect(.bounce, value: value) }
+        else { self }
     }
 }

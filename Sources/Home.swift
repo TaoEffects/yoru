@@ -1,41 +1,38 @@
 import SwiftUI
 
 struct HomeView: View {
+    @Environment(\.miniPlaybackClearance) private var miniPlaybackClearance
     @Environment(\.yoruTheme) private var theme
     @Environment(\.yoruLabels) private var labels
     @AppStorage("showRecommendations") private var showRecommendations = true
     @ObservedObject var model: Model
+    let navigationClearance: CGFloat
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 27) {
                 hero
-                if let offer = model.suggestedSeason { SeasonOfferCard(offer: offer, model: model) }
-                DiscoveredView(model: model)
+                if model.allowsDownloads {
+                    if let offer = model.suggestedSeason { SeasonOfferCard(offer: offer, model: model, opensProfile: true) }
+                    DiscoveredView(model: model)
+                }
                 if !model.series.isEmpty { libraryShelf }
             }
             .frame(maxWidth: 1490)
-            .padding(.horizontal, 30).padding(.top, 23).padding(.bottom, 32)
+            .padding(.horizontal, 30).padding(.top, 23 + navigationClearance).padding(.bottom, 32 + miniPlaybackClearance)
             .frame(maxWidth: .infinity)
-        }
-        .background {
-            if theme.secondaryGlow != nil { ArtBackdrop() }
-            else { theme.background }
         }
     }
 
     private var hero: some View {
         let resume = model.continuing
-        let needsLibrary = model.libraryReady && model.series.isEmpty && model.nautiljonRecommendations.isEmpty
-        let feature = !needsLibrary && showRecommendations ? model.nautiljonRecommendations.first ?? model.recommendations.first : nil
+        let feature = showRecommendations && model.allowsDownloads ? model.nautiljonRecommendations.first ?? model.recommendations.first : nil
         let progress = resume.map(model.progress)
         return GeometryReader { geometry in
             HStack {
                 VStack(alignment: .leading, spacing: 11) {
-                    if !needsLibrary {
-                        Text(labels(resume == nil ? "À découvrir" : "Reprendre"))
+                    Text(labels(resume == nil ? "À découvrir" : "Reprendre"))
                         .font(YoruTypography.text(14, strong: true)).foregroundStyle(heroAccent)
-                    }
                     Text(resume?.title ?? feature?.entry.title.english ?? feature?.entry.name ?? "Ta bibliothèque")
                         .font(YoruTypography.display(geometry.size.width > 1050 ? 62 : 51))
                         .lineLimit(2).minimumScaleFactor(0.72)
@@ -55,22 +52,16 @@ struct HomeView: View {
                     } else if let reason = feature?.reason {
                         Text(reason).font(.callout).foregroundStyle(.white.opacity(0.76)).lineLimit(2)
                     }
-                    if needsLibrary {
-                        ViewThatFits(in: .horizontal) {
-                            HStack { libraryActions }
-                            VStack(alignment: .leading) { libraryActions }
-                        }
-                    } else {
-                        Button {
-                            if let resume { model.play(resume) }
-                            else if let feature { model.downloadRecommendation(feature) }
-                            else { model.tab = .library }
-                        } label: {
-                            Label(labels(resume != nil ? "Reprendre la lecture" : feature.map(downloadLabel) ?? "Ouvrir la bibliothèque"),
-                                  systemImage: resume != nil ? "play.fill" : feature == nil ? "square.grid.2x2" : "arrow.down.to.line")
-                        }.buttonStyle(ControlStyle(accent: true))
-                            .disabled(resume == nil && feature.map { model.addingTorrent || $0.entry.status == "NOT_YET_RELEASED" } == true)
-                    }
+                    Button {
+                        if let resume { model.play(resume) }
+                        else if let feature { model.present(feature) }
+                        else if model.series.isEmpty { model.chooseFolder(thenOpenLibrary: true) }
+                        else { model.tab = .library }
+                    } label: {
+                        Label(labels(resume != nil ? "Reprendre la lecture" : feature != nil ? "Voir la fiche" :
+                            model.series.isEmpty ? "Choisir un dossier" : "Ouvrir la bibliothèque"),
+                              systemImage: resume != nil ? "play.fill" : feature == nil ? "square.grid.2x2" : "arrow.right")
+                    }.buttonStyle(ControlStyle(accent: true))
                 }.frame(width: geometry.size.width * 0.56, alignment: .leading)
                 Spacer(minLength: 0)
             }
@@ -104,15 +95,6 @@ struct HomeView: View {
         .overlay(RoundedRectangle(cornerRadius: 23).strokeBorder(.white.opacity(0.1)).allowsHitTesting(false))
     }
 
-    @ViewBuilder private var libraryActions: some View {
-        Button { model.chooseFolder(thenOpenLibrary: true) } label: {
-            Label("Choisir un dossier", systemImage: "folder")
-        }.buttonStyle(ControlStyle(accent: true))
-        Button { model.chooseVideos() } label: {
-            Label("Ouvrir une vidéo", systemImage: "play.rectangle")
-        }.buttonStyle(ControlStyle())
-    }
-
     private var heroAccent: Color { YoruTheme.nuit.accent }
 
     private var libraryShelf: some View {
@@ -138,7 +120,7 @@ struct HomeView: View {
                             }
                             Spacer(minLength: 0)
                         }.padding(8).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                    }.buttonStyle(.plain).modifier(HoverCard())
+                    }.buttonStyle(DirectionalPlainStyle()).modifier(HoverCard())
                 }
             }
         }
@@ -150,7 +132,6 @@ struct DiscoveredView: View {
     @Environment(\.yoruLabels) private var labels
     @ObservedObject var model: Model
     @AppStorage("showRecommendations") private var showRecommendations = true
-    @State private var watchlistOpen = false
     @State private var shelfWidth: CGFloat = 0
     var compact = false
 
@@ -166,7 +147,7 @@ struct DiscoveredView: View {
                     HStack {
                         SectionHeading(title: "À voir", compact: compact)
                         Spacer()
-                        Button { watchlistOpen = true } label: {
+                        Button { model.watchlistOpen = true } label: {
                             Label(labels("Voir plus"), systemImage: "arrow.right")
                         }.buttonStyle(ControlStyle())
                     }
@@ -186,9 +167,6 @@ struct DiscoveredView: View {
                 GeometryReader { geometry in Color.clear.preference(key: ShelfWidth.self, value: geometry.size.width) }
             }
             .onPreferenceChange(ShelfWidth.self) { shelfWidth = $0 }
-            .sheet(isPresented: $watchlistOpen) {
-                WatchlistView(model: model, entries: model.nautiljonWatchlist)
-            }
         }
     }
 
@@ -201,13 +179,20 @@ struct DiscoveredView: View {
                   alignment: .leading, spacing: 17) {
             ForEach(Array(items.prefix(limit))) { item in
                 VStack(alignment: .leading, spacing: 7) {
-                    if compact { compactCard(item) }
-                    else { poster(item, showReason: showReason) }
-                    Button { model.downloadRecommendation(item) } label: {
-                        Label(labels(downloadLabel(item)), systemImage: "arrow.down.to.line")
-                            .lineLimit(2)
-                            .frame(minHeight: 36, alignment: .leading)
-                    }.buttonStyle(ControlStyle(horizontalPadding: 10)).disabled(model.addingTorrent)
+                    Button { model.present(item) } label: {
+                        if compact { compactCard(item) }
+                        else {
+                            DiscoveryPoster(title: item.entry.title.english ?? item.entry.name,
+                                            url: item.entry.coverImage?.large, reason: showReason ? item.reason ?? "" : nil)
+                        }
+                    }
+                    .buttonStyle(DirectionalPlainStyle(radius: 12))
+                    .accessibilityLabel(labels("Voir la fiche") + " · " + item.entry.name)
+                    if compact, !["NOT_YET_RELEASED", "CANCELLED"].contains(item.entry.status ?? "") {
+                        Button { model.downloadRecommendation(item) } label: {
+                            DownloadLabel(title: labels(downloadLabel(item))).frame(minHeight: 36, alignment: .leading)
+                        }.buttonStyle(ControlStyle(horizontalPadding: 10)).disabled(model.addingTorrent)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
                 .modifier(RecommendationHover(compact: compact))
@@ -219,24 +204,6 @@ struct DiscoveredView: View {
         }
     }
 
-    private func poster(_ item: Discovery, showReason: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Rectangle().fill(theme.card)
-                .aspectRatio(0.72, contentMode: .fit)
-                .overlay { WideArtwork(url: item.entry.coverImage?.large) }
-                .clipShape(RoundedRectangle(cornerRadius: 9))
-                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(theme.divider).allowsHitTesting(false))
-            Text(item.entry.title.english ?? item.entry.name)
-                .font(YoruTypography.text(15, strong: true)).lineLimit(2, reservesSpace: true)
-            if showReason {
-                Text(item.reason ?? "").font(YoruTypography.text(13)).foregroundStyle(theme.mutedText)
-                    .lineLimit(1, reservesSpace: true)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-    }
-
     private func compactCard(_ item: Discovery) -> some View {
         HStack(spacing: 9) {
             CoverArt(url: item.entry.coverImage?.large, width: 42, height: 58, radius: 6)
@@ -244,6 +211,35 @@ struct DiscoveredView: View {
                 .font(YoruTypography.text(14, strong: true)).lineLimit(2)
             Spacer(minLength: 0)
         }.padding(8).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+    }
+}
+
+private struct DiscoveryPoster: View {
+    @Environment(\.yoruTheme) private var theme
+    let title: String
+    let url: URL?
+    var reason: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            RoundedRectangle(cornerRadius: 11).fill(theme.card)
+                .aspectRatio(0.72, contentMode: .fit)
+                .overlay {
+                    Image(systemName: "play.rectangle")
+                        .font(.system(size: 28, weight: .medium)).foregroundStyle(theme.accent.opacity(0.52))
+                        .accessibilityHidden(true)
+                    WideArtwork(url: url)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 11))
+                .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(theme.divider).allowsHitTesting(false))
+            Text(title).font(YoruTypography.text(16, strong: true)).lineLimit(2, reservesSpace: true)
+            if let reason {
+                Text(reason).font(YoruTypography.text(13)).foregroundStyle(theme.mutedText)
+                    .lineLimit(1, reservesSpace: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 }
 
@@ -267,60 +263,144 @@ private struct RecommendationHover: ViewModifier {
     }
 }
 
-private struct WatchlistView: View {
+struct WatchlistGallery: View {
+    @Environment(\.miniPlaybackClearance) private var miniPlaybackClearance
     @ObservedObject var model: Model
-    let entries: [NautiljonTitle]
-    @Environment(\.dismiss) private var dismiss
+    let navigationClearance: CGFloat
     @Environment(\.yoruTheme) private var theme
     @Environment(\.yoruLabels) private var labels
     @State private var query = ""
+    @StateObject private var artwork = WatchlistArtwork()
 
     var body: some View {
+        let entries = model.nautiljonWatchlist
         let needle = query.trimmed
-        let visible = needle.isEmpty ? entries : entries.filter {
-            $0.titles.contains { $0.localizedStandardContains(needle) }
+        let visible = entries.enumerated().filter { _, row in
+            needle.isEmpty || row.titles.contains { $0.localizedStandardContains(needle) }
         }
-        VStack(alignment: .leading, spacing: 15) {
-            HStack {
-                SectionHeading(title: "À voir", count: entries.count)
-                Spacer()
-                Button(labels("Fermer")) { dismiss() }.buttonStyle(ControlStyle()).keyboardShortcut(.cancelAction)
-            }
-            SearchField(title: "Rechercher dans la liste", value: $query, icon: "magnifyingglass")
-            if visible.isEmpty {
-                Text(labels("Aucun résultat")).foregroundStyle(theme.mutedText)
-                Spacer()
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 7) {
-                        ForEach(Array(visible.enumerated()), id: \.offset) { _, entry in
-                            Button {
-                                dismiss()
-                                model.openWatchlistTitle(entry)
-                            } label: {
-                                HStack {
-                                    Text(entry.titles.first ?? "").font(YoruTypography.text(18, strong: true)).lineLimit(2)
-                                    Spacer()
-                                    Image(systemName: "arrow.down.to.line").foregroundStyle(theme.accent)
-                                }
-                                .padding(.horizontal, 14).frame(minHeight: 51)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain).modifier(HoverCard()).help("Voir les téléchargements")
-                        }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Button { model.watchlistOpen = false } label: {
+                    Label(labels("Retour"), systemImage: "chevron.left")
+                }.buttonStyle(ControlStyle())
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .center, spacing: 24) {
+                        heading(count: visible.count).fixedSize()
+                        Spacer(minLength: 12)
+                        search.frame(minWidth: 260, maxWidth: 430)
+                    }
+                    VStack(alignment: .leading, spacing: 15) {
+                        heading(count: visible.count)
+                        search
+                    }
+                }
+                if visible.isEmpty {
+                    Text(labels("Aucun résultat")).font(YoruTypography.text(17)).foregroundStyle(theme.mutedText)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 157, maximum: 230), spacing: 19, alignment: .topLeading)],
+                              alignment: .leading, spacing: 21) {
+                        ForEach(visible, id: \.offset) { _, row in card(row) }
                     }
                 }
             }
+            .frame(maxWidth: 1490, alignment: .leading)
+            .padding(.horizontal, 30).padding(.top, navigationClearance + 23).padding(.bottom, (artwork.failed ? 78 : 32) + miniPlaybackClearance)
+            .frame(maxWidth: .infinity)
         }
-        .padding(22).frame(width: 665, height: 580)
-        .background { ArtBackdrop() }
-        .foregroundStyle(theme.primary)
+        .overlay(alignment: .bottomTrailing) {
+            if artwork.failed {
+                Button { artwork.retry() } label: {
+                    Label(labels("Recharger les affiches"), systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(ControlStyle(accent: true))
+                .padding(22)
+                .padding(.bottom, miniPlaybackClearance)
+            }
+        }
+        .onDisappear { artwork.stop() }
+    }
+
+    private var search: some View {
+        SearchField(title: "Rechercher un anime", value: $query, icon: "magnifyingglass")
+    }
+
+    private func heading(count: Int) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            SectionHeading(title: "À voir")
+            Text(labels(count == 1 ? "1 titre" : "\(count) titres"))
+                .font(YoruTypography.text(16, strong: true)).foregroundStyle(theme.mutedText)
+        }
+    }
+
+    private func card(_ row: NautiljonTitle) -> some View {
+        let suggestion = model.nautiljonRecommendations.first { !$0.entry.titleKeys.isDisjoint(with: row.keys) }?.entry
+        let entry = suggestion ?? artwork.entries[row.titles]
+        let title = row.titles.first ?? entry?.name ?? "Anime"
+        return Button { model.openWatchlistTitle(row, entry: entry) } label: {
+            DiscoveryPoster(title: title, url: entry?.coverImage?.large)
+        }
+        .buttonStyle(DirectionalPlainStyle(radius: 12))
+        .modifier(RecommendationHover(compact: false))
+        .accessibilityLabel(labels("Voir la fiche") + " · " + title)
+        .onAppear { if suggestion == nil { artwork.show(row) } }
+        .onDisappear { artwork.hide(row) }
+    }
+}
+
+@MainActor private final class WatchlistArtwork: ObservableObject {
+    @Published private(set) var entries: [[String]: Anime] = [:]
+    @Published private(set) var failed = false
+    private var absent: Set<[String]> = []
+    private var visible: [NautiljonTitle] = []
+    private var loader: Task<Void, Never>?
+
+    func show(_ row: NautiljonTitle) {
+        if !visible.contains(where: { $0.titles == row.titles }) { visible.append(row) }
+        load()
+    }
+
+    func hide(_ row: NautiljonTitle) { visible.removeAll { $0.titles == row.titles } }
+
+    func retry() { failed = false; load() }
+
+    func stop() {
+        loader?.cancel()
+        loader = nil
+        visible.removeAll()
+    }
+
+    private func load() {
+        guard loader == nil, !failed else { return }
+        loader = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 70_000_000)
+            guard let self, !Task.isCancelled else { return }
+            defer { if !Task.isCancelled { loader = nil } }
+            while !Task.isCancelled {
+                let pending = visible.lazy.filter { self.entries[$0.titles] == nil && !self.absent.contains($0.titles) }
+                let batch = Array(pending.prefix(6))
+                guard !batch.isEmpty else { return }
+                do {
+                    let matches = try await Catalog.matchWatchlist(batch)
+                    try Task.checkCancellation()
+                    var next = entries
+                    for (row, match) in zip(batch, matches) {
+                        if let match { next[row.titles] = match }
+                        else { absent.insert(row.titles) }
+                    }
+                    entries = next
+                } catch {
+                    if !Task.isCancelled { failed = true }
+                    return
+                }
+            }
+        }
     }
 }
 
 struct SeasonOfferCard: View {
     let offer: SeasonOffer
     @ObservedObject var model: Model
+    var opensProfile = false
     @Environment(\.yoruLabels) private var labels
 
     var body: some View {
@@ -332,9 +412,15 @@ struct SeasonOfferCard: View {
                 Text(offer.title).font(.callout).foregroundStyle(.secondary).lineLimit(2)
             }
             Spacer(minLength: 4)
-            if !offer.announced {
+            if opensProfile {
+                Button {
+                    model.presentedAnime = AnimePresentation(names: [offer.title], entry: nil, season: offer)
+                } label: {
+                    Label(labels("Voir la saison"), systemImage: "arrow.right")
+                }.buttonStyle(ControlStyle())
+            } else if !offer.announced {
                 Button { model.downloadSeason(offer) } label: {
-                    Label(labels("Télécharger la saison"), systemImage: "arrow.down.to.line")
+                    DownloadLabel(title: labels("Télécharger la saison"))
                 }.buttonStyle(ControlStyle(accent: true)).disabled(model.addingTorrent)
             }
         }.padding(10).frame(maxWidth: .infinity, alignment: .leading).modifier(HoverCard())
@@ -342,7 +428,6 @@ struct SeasonOfferCard: View {
 }
 
 private func downloadLabel(_ item: Discovery) -> String {
-    if item.entry.status == "NOT_YET_RELEASED" { return "À venir" }
     if item.entry.status == "RELEASING" { return "Télécharger les épisodes disponibles" }
     return item.entry.format == "MOVIE" ? "Télécharger le film" : "Télécharger la saison"
 }
