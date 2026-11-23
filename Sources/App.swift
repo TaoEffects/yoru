@@ -56,7 +56,7 @@ struct ControlStyle: PrimitiveButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         Button(configuration)
             .buttonStyle(VisualControlStyle(selected: selected, accent: accent, horizontalPadding: horizontalPadding, compact: compact))
-            .directionalTarget(radius: 100, action: configuration.trigger)
+            .directionalTarget(radius: 100, animatesButton: true, action: configuration.trigger)
     }
 }
 
@@ -69,6 +69,7 @@ private struct VisualControlStyle: ButtonStyle {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.isEnabled) private var enabled
+    @AppStorage("animatePlaybackButtons") private var animateButtons = true
     @AppStorage("lightweight") private var lightweight = false
     func makeBody(configuration: Configuration) -> some View {
         let dark = scheme == .dark
@@ -85,15 +86,15 @@ private struct VisualControlStyle: ButtonStyle {
             .foregroundStyle(text)
             .contentShape(Capsule())
             .modifier(Glass(radius: 100, tint: promoted ? tint.opacity(accent ? 0.32 : 0.23) : nil,
-                            interactive: enabled && !reduceMotion, fallback: filledFallback))
+                            interactive: enabled && animateButtons && !reduceMotion, fallback: filledFallback))
             .opacity(enabled ? 1 : 0.47)
-            .scaleEffect(configuration.isPressed && !reduceMotion && !lightweight ? 0.97 : 1)
-            .animation(reduceMotion || lightweight ? nil : YoruMotion.selection, value: configuration.isPressed)
+            .modifier(GlassButtonMotion(pressed: configuration.isPressed, radius: 100))
     }
 }
 
 @main struct YoruApp: App {
     @StateObject private var model = Model()
+    @AppStorage("interfaceLanguage") private var interfaceLanguage = "system"
     @AppStorage(YoruUsageMode.preferenceKey) private var usagePreference = ""
     var body: some Scene {
         WindowGroup("Yoru Public") {
@@ -103,6 +104,7 @@ private struct VisualControlStyle: ButtonStyle {
             }
             .frame(minWidth: 780, minHeight: 510)
             .dynamicTypeSize(.large)
+            .environment(\.locale, Locale(identifier: L.code))
             .onOpenURL { model.openFiles([$0]) }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in model.saveProgress() }
         }
@@ -110,21 +112,21 @@ private struct VisualControlStyle: ButtonStyle {
         .defaultSize(width: 1150, height: 735)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("Ouvrir une vidéo…") { model.chooseVideos() }.keyboardShortcut("o")
+                Button(L.tr("Ouvrir une vidéo…")) { model.chooseVideos() }.keyboardShortcut("o")
                 if YoruUsageMode(rawValue: usagePreference)?.hasLibrary == true {
-                    Button("Choisir le dossier de la bibliothèque…") { model.chooseFolder(thenOpenLibrary: true) }
+                    Button(L.tr("Choisir le dossier de la bibliothèque…")) { model.chooseFolder(thenOpenLibrary: true) }
                 }
             }
             CommandGroup(replacing: .appSettings) {
-                Button("Réglages…") { model.settings = true }.keyboardShortcut(",").disabled(usagePreference.isEmpty)
+                Button(L.tr("Réglages…")) { model.settings = true }.keyboardShortcut(",").disabled(usagePreference.isEmpty)
             }
-            CommandMenu("Lecture") {
-                Button("Plein écran") { NSApp.keyWindow?.toggleFullScreen(nil) }.keyboardShortcut("f", modifiers: [.option, .command])
-                Button("Ajuster la fenêtre en 16:9") { if let window = NSApp.keyWindow { fitPlaybackWindow(window) } }
+            CommandMenu(L.tr("Lecture")) {
+                Button(L.tr("Plein écran")) { NSApp.keyWindow?.toggleFullScreen(nil) }.keyboardShortcut("f", modifiers: [.option, .command])
+                Button(L.tr("Ajuster la fenêtre en 16:9")) { if let window = NSApp.keyWindow { fitPlaybackWindow(window) } }
                     .disabled(model.tab != .player)
-                Button("Ouvrir les sous-titres…") { model.chooseSubtitle() }
-                Button("Épisode précédent") { if let previous = model.previous { model.play(previous) } }.disabled(model.previous == nil)
-                Button("Épisode suivant") { model.startNextEpisode() }.disabled(model.next == nil)
+                Button(L.tr("Ouvrir les sous-titres…")) { model.chooseSubtitle() }
+                Button(L.tr("Épisode précédent")) { if let previous = model.previous { model.play(previous) } }.disabled(model.previous == nil)
+                Button(L.tr("Épisode suivant")) { model.startNextEpisode() }.disabled(model.next == nil)
             }
         }
     }
@@ -221,8 +223,10 @@ private struct NavigationScroll: NSViewRepresentable {
 
 struct RootView: View {
     @ObservedObject var model: Model
+    @AppStorage("interfaceLanguage") private var interfaceLanguage = "system"
     let topInset: CGFloat
     @State private var keyMonitor: Any?
+    @State private var spacePress = PlaybackPress()
     @State private var navigation = DirectionalNavigation()
     @State private var controllers = ControllerInput()
     @State private var dropTarget = false
@@ -245,6 +249,7 @@ struct RootView: View {
     @State private var browsingPictureInPicture = false
     @State private var pictureInPictureActive = false
     @AppStorage("browsePlayback") private var browsePlayback: BrowsePlayback = .bubble
+    @AppStorage("animatePlaybackButtons") private var animateButtons = true
     @AppStorage("playbackArrows") private var playbackArrows: PlaybackArrows = .hybrid
     @AppStorage(YoruUsageMode.preferenceKey) private var usagePreference = ""
     private var labels: InterfaceLabels { InterfaceLabels(lowercase: lowercaseInterface) }
@@ -269,18 +274,26 @@ struct RootView: View {
             applyMode(usage)
         }
         .onChange(of: model.tab) { tab in
+            cancelPlaybackHold()
             model.presentedAnime = nil
             model.watchlistOpen = false
             if tab != .player { model.closePlayerDownloads() }
             sizeFirstPlayback()
             updateBrowsingPlayback()
         }
-        .onChange(of: model.current?.id) { _ in sizeFirstPlayback(); updateBrowsingPlayback() }
+        .onChange(of: model.current?.id) { _ in cancelPlaybackHold(); sizeFirstPlayback(); updateBrowsingPlayback() }
         .onChange(of: browsePlayback) { _ in updateBrowsingPlayback() }
         .onReceive(model.player.$loaded.removeDuplicates()) { loaded in
             if loaded { Task { @MainActor in updateBrowsingPlayback() } }
+            else { cancelPlaybackHold() }
         }
         .onReceive(model.player.$pictureInPictureActive.removeDuplicates()) { pictureInPictureActive = $0 }
+        .onChange(of: model.settings) { _ in cancelPlaybackHold() }
+        .onChange(of: model.playerDownloadsOpen) { _ in cancelPlaybackHold() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willResignActiveNotification)) { _ in cancelPlaybackHold() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) {
+            if ($0.object as? NSWindow) === windowReference.window { cancelPlaybackHold() }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in sizeFirstPlayback() }
         .onChange(of: model.libraryReady) { ready in
             if ready { Task { await model.discover() } }
@@ -291,7 +304,7 @@ struct RootView: View {
         .sheet(isPresented: $model.settings) { SettingsView(model: model) }
         .alert("Yoru", isPresented: Binding(get: { !model.message.isEmpty }, set: { if !$0 { model.message = "" } })) {
             Button("OK") { model.message = "" }
-        } message: { Text(model.message) }
+        } message: { Text(L.tr(model.message)) }
         .buttonStyle(DirectionalPlainStyle())
         .environment(\.directionalNavigation, navigation)
     }
@@ -449,7 +462,7 @@ struct RootView: View {
     private func begin() {
         if let usage { applyMode(usage) }
         if keyMonitor == nil {
-            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown], handler: handleEvent)
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .leftMouseDown, .rightMouseDown], handler: handleEvent)
         }
         controllers.receive = { input in _ = navigate(input, in: NSApp.keyWindow) }
         controllers.start()
@@ -458,12 +471,23 @@ struct RootView: View {
     }
 
     private func end() {
+        cancelPlaybackHold()
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor); self.keyMonitor = nil }
         controllers.stop()
         controllers.receive = nil
     }
 
     private func handleEvent(_ event: NSEvent) -> NSEvent? {
+        if event.type == .keyUp {
+            guard event.keyCode == 49, spacePress.isPressed else { return event }
+            let held = spacePress.release()
+            if !held, canHoldSpace(in: event.window) {
+                model.player.toggle()
+                NotificationCenter.default.post(name: .yoruPlaybackActivity, object: nil)
+            }
+            return nil
+        }
+        if event.type == .keyDown, event.keyCode == 49, spacePress.isPressed { return nil }
         if event.type != .keyDown {
             if let window = event.window { navigation.point(at: event.locationInWindow, in: window) }
             else { navigation.clear() }
@@ -471,6 +495,24 @@ struct RootView: View {
         }
         return key(event) ? nil : event
     }
+
+    private func canHoldSpace(in window: NSWindow?) -> Bool {
+        guard let window else { return false }
+        return window === windowReference.window && window.isKeyWindow && window.attachedSheet == nil
+            && !(window.firstResponder is NSTextView) && !navigation.hasOverlay(in: window)
+            && model.tab == .player && model.current != nil && model.player.loaded
+            && !model.player.pictureInPictureActive && !model.settings && model.message.isEmpty
+            && !model.playerDownloadsOpen && !model.watchlistOpen && model.presentedAnime == nil
+    }
+
+    private func cancelPlaybackHold() {
+        spacePress.cancel()
+        model.player.cancelSpeedBoost()
+    }
+
+
+
+
 
     private func openDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
         let group = DispatchGroup()
@@ -722,11 +764,18 @@ struct RootView: View {
         guard model.tab == .player, model.current != nil else { return false }
         NotificationCenter.default.post(name: .yoruPlaybackActivity, object: nil)
         switch event.keyCode {
-        case 49: model.player.toggle()
+        case 49:
+            guard canHoldSpace(in: window), !event.isARepeat else { return false }
+            spacePress.begin {
+                if canHoldSpace(in: window) { model.player.beginSpeedBoost(.keyboard) }
+                else { spacePress.cancel() }
+            } released: {
+                model.player.endSpeedBoost(.keyboard)
+            }
         default:
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "f": NSApp.keyWindow?.toggleFullScreen(nil)
-            case "d" where usage?.hasDownloads == true: model.openPlayerDownloads()
+            case "d": model.openPlayerDownloads()
             case "c":
                 if event.modifierFlags.contains(.shift) {
                     NotificationCenter.default.post(name: .yoruSubtitleOptions, object: nil)
@@ -1118,6 +1167,37 @@ struct LibraryView: View {
         }
     }
 
+    private func libraryPrimaryActions(_ show: Series, resume: Episode?, episodes: [Episode]) -> some View {
+        HStack(spacing: 6) {
+            if let first = resume ?? episodes.first(where: { !model.progress($0).watched }) ?? episodes.first {
+                Button { model.play(first) } label: {
+                    Label(labels(resume == nil ? "Regarder" : "Reprendre"), systemImage: "play.fill")
+                }.buttonStyle(ControlStyle(accent: true))
+                    .help(resume.map { $0.display + " · " + formatTime(model.progress($0).seconds) } ?? first.display)
+            }
+            if model.allowsDownloads {
+                Button { model.downloadLibrarySeason(show) } label: {
+                    DownloadLabel(title: labels("Télécharger"))
+                }.buttonStyle(ControlStyle()).disabled(model.addingTorrent)
+                    .contextMenu { Button(labels("Choisir une version")) { model.findDownloads(show) } }
+            }
+        }
+    }
+
+    private func librarySecondaryActions(_ show: Series) -> some View {
+        HStack(spacing: 6) {
+            Button {
+                model.updateShow(show.id) { $0.watchlist.toggle() }
+                if model.selectedSeries == nil { model.select(model.displayed.first?.id) }
+            } label: {
+                Image(systemName: model.state.shows[show.id]?.watchlist == true ? "bookmark.fill" : "bookmark")
+            }.buttonStyle(ControlStyle()).accessibilityLabel("À regarder").help("À regarder")
+            Button { editShow = show } label: {
+                Image(systemName: "slider.horizontal.3")
+            }.buttonStyle(ControlStyle()).accessibilityLabel("Modifier les informations").help("Modifier le titre, la note ou le lien")
+        }
+    }
+
     func title(_ show: Series) -> some View {
         let episodes = model.seasonEpisodes
         let watched = episodes.filter { model.progress($0).watched }.count
@@ -1128,8 +1208,9 @@ struct LibraryView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text(show.title)
                     .font(YoruTypography.display(48))
-                    .textSelection(.enabled).lineLimit(2).minimumScaleFactor(0.75)
+                    .textSelection(.enabled).lineLimit(3).minimumScaleFactor(0.75)
                     .accessibilityAddTraits(.isHeader)
+                    .help(show.title)
                 if !episodes.isEmpty, episodes.contains(where: { $0.number != nil }) {
                     HStack(spacing: 8) {
                         if let season = model.librarySeason { Text("Saison \(season)") }
@@ -1137,34 +1218,21 @@ struct LibraryView: View {
                             .monospacedDigit()
                     }.font(YoruTypography.text(14)).foregroundStyle(.white.opacity(0.75))
                 }
-                HStack(spacing: 6) {
-                    if let first = resume ?? episodes.first(where: { !model.progress($0).watched }) ?? episodes.first {
-                        Button { model.play(first) } label: {
-                            Label(labels(resume == nil ? "Regarder" : "Reprendre"), systemImage: "play.fill")
-                        }.buttonStyle(ControlStyle(accent: true))
-                            .help(resume.map { $0.display + " · " + formatTime(model.progress($0).seconds) } ?? first.display)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 6) {
+                        libraryPrimaryActions(show, resume: resume, episodes: episodes)
+                        librarySecondaryActions(show)
+                    }.fixedSize(horizontal: true, vertical: false)
+                    VStack(alignment: .leading, spacing: 7) {
+                        libraryPrimaryActions(show, resume: resume, episodes: episodes)
+                        librarySecondaryActions(show)
                     }
-                    if model.allowsDownloads {
-                        Button { model.downloadLibrarySeason(show) } label: {
-                            DownloadLabel(title: labels("Télécharger"))
-                        }.buttonStyle(ControlStyle()).disabled(model.addingTorrent)
-                            .contextMenu { Button(labels("Choisir une version")) { model.findDownloads(show) } }
-                    }
-                    Button {
-                        model.updateShow(show.id) { $0.watchlist.toggle() }
-                        if model.selectedSeries == nil { model.select(model.displayed.first?.id) }
-                    } label: {
-                        Image(systemName: model.state.shows[show.id]?.watchlist == true ? "bookmark.fill" : "bookmark")
-                    }.buttonStyle(ControlStyle()).accessibilityLabel("À regarder").help("À regarder")
-                    Button { editShow = show } label: {
-                        Image(systemName: "slider.horizontal.3")
-                    }.buttonStyle(ControlStyle()).accessibilityLabel("Modifier les informations").help("Modifier le titre, la note ou le lien")
                 }
                 if let link = model.state.shows[show.id]?.nautiljonURL, let url = URL(string: link), url.scheme == "https" {
                     Link("Nautiljon", destination: url).font(.caption).foregroundStyle(YoruTheme.nuit.accent)
                 }
             }
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(18).frame(maxWidth: .infinity, minHeight: 169, alignment: .leading)
         .foregroundStyle(.white)

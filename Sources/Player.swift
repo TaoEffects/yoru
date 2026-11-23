@@ -172,6 +172,11 @@ final class VideoSurface: NSView {
     required init?(coder: NSCoder) { nil }
     override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); updateScale(); layer?.setNeedsDisplay() }
     override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); updateScale() }
+    override func setFrameSize(_ newSize: NSSize) {
+        let changed = frame.size != newSize
+        super.setFrameSize(newSize)
+        if changed { layer?.setNeedsDisplay() }
+    }
     private func updateScale() { layer?.contentsScale = window?.backingScaleFactor ?? 1 }
     func frameIfNeeded() {
         if window != nil, backend?.hasFrame() == true { layer?.setNeedsDisplay() }
@@ -201,6 +206,9 @@ final class Player: ObservableObject {
     private var correctedDuration: Double?
     private let audioDevicesObservation: UInt64 = 1
     private var failedAudioOutput: String?
+    private var speedBoostInputs: Set<SpeedBoostInput> = []
+    private var speedBeforeBoost = 1.0
+    private var pausedBeforeBoost = false
     @MainActor lazy var pictureInPicture = PictureInPicture(player: self)
 
     @Published var position = 0.0
@@ -217,6 +225,7 @@ final class Player: ObservableObject {
     @Published var skips: [SkipSegment] = []
     @Published var error = ""
     @Published var loaded = false
+    @Published private(set) var speedBoosted = false
     @Published private(set) var pictureInPictureActive = false
     private var loop: ClosedRange<Double>?
 
@@ -275,6 +284,7 @@ final class Player: ObservableObject {
     }
 
     func open(_ url: URL, resume: Double) {
+        cancelSpeedBoost()
         requestedPosition = resume
         ready = false
         reportedEnd = false
@@ -300,6 +310,7 @@ final class Player: ObservableObject {
     }
 
     @MainActor func stop() {
+        cancelSpeedBoost()
         stopPictureInPicture(restore: false)
         command(["stop"])
         ready = false
@@ -319,7 +330,10 @@ final class Player: ObservableObject {
         if pictureInPictureActive { pictureInPicture.stop(restore: restore) }
     }
 
-    func setPictureInPictureActive(_ active: Bool) { pictureInPictureActive = active }
+    func setPictureInPictureActive(_ active: Bool) {
+        if active { cancelSpeedBoost() }
+        pictureInPictureActive = active
+    }
 
     var displayAspectRatio: CGSize {
         guard let width = property("dwidth").flatMap(Double.init), let height = property("dheight").flatMap(Double.init),
@@ -327,8 +341,34 @@ final class Player: ObservableObject {
         return CGSize(width: width, height: height)
     }
     func toggle() {
+        cancelSpeedBoost()
         if reportedEnd { seek(0); reportedEnd = false; set("pause", "no"); return }
-        set("pause", paused ? "no" : "yes")
+        set("pause", property("pause") == "yes" ? "no" : "yes")
+    }
+
+    func beginSpeedBoost(_ input: SpeedBoostInput) {
+        guard ready, loaded, !reportedEnd, !pictureInPictureActive,
+              property("eof-reached") != "yes", speedBoostInputs.insert(input).inserted else { return }
+        guard !speedBoosted else { return }
+        let speed = property("speed").flatMap(Double.init) ?? 1
+        speedBeforeBoost = speed.isFinite && speed > 0 ? speed : 1
+        pausedBeforeBoost = property("pause") == "yes"
+        set("speed", "2")
+        set("pause", "no")
+        speedBoosted = true
+    }
+
+    func endSpeedBoost(_ input: SpeedBoostInput) {
+        speedBoostInputs.remove(input)
+        if speedBoostInputs.isEmpty { cancelSpeedBoost() }
+    }
+
+    func cancelSpeedBoost() {
+        speedBoostInputs.removeAll()
+        guard speedBoosted else { return }
+        set("speed", String(speedBeforeBoost))
+        if pausedBeforeBoost { set("pause", "yes") }
+        speedBoosted = false
     }
     func setVolume(_ value: Double) { volume = max(0, min(100, value)); set("volume", String(volume)) }
     func subtitles(_ id: Int?) { activeSubtitle = id; set("sid", id.map(String.init) ?? "no") }
@@ -500,6 +540,7 @@ final class Player: ObservableObject {
                 if requestedPosition > 3 { seek(requestedPosition) }
                 didLoad?()
             case MPV_EVENT_END_FILE:
+                cancelSpeedBoost()
                 let result = event.pointee.data?.assumingMemoryBound(to: mpv_event_end_file.self).pointee
                 if result?.reason == MPV_END_FILE_REASON_ERROR {
                     ready = false
@@ -522,9 +563,11 @@ final class Player: ObservableObject {
             if position != next { position = next }
         }
         let isPaused = property("pause") == "yes"
+        if isPaused { cancelSpeedBoost() }
         if isPaused != paused { paused = isPaused; if paused { save?() } }
         if let loop, position >= loop.upperBound { seek(loop.lowerBound) }
         if property("eof-reached") == "yes" {
+            cancelSpeedBoost()
             if !reportedEnd {
                 reportedEnd = true
                 if let time, time > 0, duration - time > 0.75 {

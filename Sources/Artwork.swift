@@ -96,7 +96,7 @@ enum FrameImage {
 
     private static func render(_ episode: Episode, featureTime: Int?, scrubTime: Int?) -> NSImage? {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        let folder = base.appendingPathComponent(scrubTime == nil ? "io.github.taoeffects.yoru/Frames" : "io.github.taoeffects.yoru/Timeline")
+        let folder = base.appendingPathComponent(scrubTime == nil ? "local.yoru.player/Frames" : "local.yoru.player/Timeline")
         let key = SubtitleService.version(episode) + (scrubTime.map { "-\($0)" } ?? featureTime.map { "-hero-\($0)" } ?? "")
         let target = folder.appendingPathComponent(key + ".jpg")
         if let image = NSImage(contentsOf: target) { return image }

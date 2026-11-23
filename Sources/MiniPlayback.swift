@@ -94,7 +94,7 @@ struct MiniPlaybackView: View {
             .contentShape(RoundedRectangle(cornerRadius: 15))
         }
         .buttonStyle(DirectionalPlainStyle(radius: 15))
-        .help(labels("Revenir au lecteur"))
+        .help(labels("Revenir au lecteur") + " · " + episode.title)
         .accessibilityHint(labels("Revenir au lecteur"))
     }
 

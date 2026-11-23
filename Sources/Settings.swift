@@ -180,10 +180,11 @@ struct SettingsView: View {
 
     private var appearance: some View {
         VStack(spacing: 16) {
+            LanguageChoice()
             SettingsGroup(title: labels("Mode d’utilisation")) {
                 settingChoice("Accueil et fonctionnalités", selection: $usagePreference,
                               choices: YoruUsageMode.allCases.map { ($0.rawValue, $0.title) })
-                Text(usage.detail).font(YoruTypography.text(16)).foregroundStyle(theme.mutedText)
+                Text(L.tr(usage.detail)).font(YoruTypography.text(16)).foregroundStyle(theme.mutedText)
             }
             SettingsGroup(title: labels("Thème")) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 106), spacing: 10)], spacing: 10) {
@@ -397,7 +398,7 @@ struct SettingsView: View {
 
     private func settingToggle(_ title: String, isOn: Binding<Bool>) -> some View {
         HStack(spacing: 12) {
-            Text(labels(title)).accessibilityHidden(true)
+            Text(labels(title)).fixedSize(horizontal: false, vertical: true).accessibilityHidden(true)
             Spacer(minLength: 0)
             Toggle(labels(title), isOn: isOn)
                 .labelsHidden()
@@ -438,7 +439,7 @@ struct SettingsView: View {
 
     private func settingField(_ title: String, value: Binding<String>, secure: Bool = false, hint: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(labels(title)).accessibilityHidden(true)
+            Text(labels(title)).fixedSize(horizontal: false, vertical: true).accessibilityHidden(true)
             Group {
                 if secure {
                     SecureField(labels(title), text: value)

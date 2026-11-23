@@ -4,11 +4,10 @@ struct NyaaSource: Identifiable {
     let id: String
     let label: String
     let sample: String
-    var url: URL { URL(string: id == "trusted" ? "https://nyaa.si/?f=2" : "https://nyaa.si/user/" + id)! }
+    var url: URL { URL(string: "https://nyaa.si/user/" + id)! }
 
-    static let defaults = "trusted"
+    static let defaults = "Judas,Trix,Ironclad"
     static let catalog: [NyaaSource] = [
-        .init(id: "trusted", label: "Publications vérifiées", sample: "Résultats marqués comme vérifiés sur Nyaa"),
         .init(id: "Judas", label: "Judas", sample: "Ranma 1/2 (2024) · S03E07 · HEVC"),
         .init(id: "NekoTrix", label: "Trix", sample: "Blue Box · S02E06 · Ao no Hako · AV1"),
         .init(id: "Ironclad", label: "Ironclad", sample: "Gundam GQuuuuuuX · S01 · AV1"),

@@ -2,6 +2,29 @@ import Foundation
 import CryptoKit
 import AppKit
 
+struct TorrentQuery {
+    let title: String
+    let season: Int?
+    let episode: Int?
+
+    init(_ text: String) {
+        let raw = text.trimmed
+        if let suffix = raw.match(#"(?i)^(.*?)[ ._:-]+(?:s(?:aison|eason)?\s*)(\d{1,2})(?:[ ._-]*(?:e|ep\.?|épisode)\s*(\d{1,4}))?$"#) {
+            title = suffix[1].trimmed
+            season = Int(suffix[2])
+            episode = Int(suffix[3])
+        } else {
+            title = SeasonNumber.base(raw)
+            season = title == raw ? nil : SeasonNumber.first(in: raw)
+            episode = nil
+        }
+    }
+
+    var resolvedTitle: String {
+        title.normalized == "tensura" ? "Tensei Shitara Slime Datta Ken" : title
+    }
+}
+
 struct TorrentResult: Identifiable, Equatable {
     var id: String
     var title: String
@@ -39,6 +62,11 @@ struct TorrentResult: Identifiable, Equatable {
     var isPack: Bool {
         episode == nil && (isRange || season != nil || title.match(#"(?i)\b(batch|complete|collection|pack|saisons?)\b"#) != nil)
     }
+    var seasonTitle: String {
+        let base = SeasonNumber.base(artworkTitle)
+        guard let season, let suffix = base.match(#"^(.*)\s+(\d{1,2})$"#), Int(suffix[2]) == season else { return base }
+        return suffix[1].trimmed
+    }
     var scopeLabel: String {
         let numbers = seasons.sorted()
         let season = numbers.count == 1 ? "Saison \(numbers[0])" : numbers.isEmpty ? "" : "Saisons " + numbers.map(String.init).joined(separator: ", ")
@@ -46,6 +74,37 @@ struct TorrentResult: Identifiable, Equatable {
         return [season, isPack ? "Pack" : "Vidéo"].filter { !$0.isEmpty }.joined(separator: " · ")
     }
     var french: Bool { title.match(#"(?i)\b(vostfr|french|vff|multi.?fr)\b"#) != nil }
+}
+
+struct TorrentSeasonGroup: Identifiable {
+    struct Key: Hashable {
+        let title: String
+        let seasons: [Int]
+    }
+
+    let id: Key
+    let title: String
+    let packs: [TorrentResult]
+    let episodes: [TorrentResult]
+
+    static func group(_ rows: [TorrentResult], preferred: Set<Int>) -> [Self] {
+        let candidates = rows.filter { $0.isPack || $0.episode != nil }
+        let groups = Dictionary(grouping: candidates) { row in
+            Key(title: row.seasonTitle.normalized, seasons: row.seasons.sorted())
+        }
+        let ranks = Dictionary(candidates.enumerated().map { ($1.id, $0) }, uniquingKeysWith: min)
+        return groups.compactMap { key, entries -> (group: Self, exact: Bool, rank: Int)? in
+            guard let first = entries.first else { return nil }
+            let group = Self(id: key, title: first.seasonTitle,
+                             packs: entries.filter(\.isPack), episodes: entries.filter { $0.episode != nil })
+            let exact = !preferred.isEmpty && key.seasons.count == 1 && preferred.contains(key.seasons[0])
+            return (group, exact, ranks[first.id] ?? Int.max)
+        }.sorted { lhs, rhs in
+            if lhs.exact != rhs.exact { return lhs.exact }
+            if lhs.group.packs.isEmpty != rhs.group.packs.isEmpty { return !lhs.group.packs.isEmpty }
+            return lhs.rank < rhs.rank
+        }.map(\.group)
+    }
 }
 
 private final class Feed: NSObject, XMLParserDelegate {
@@ -169,7 +228,8 @@ enum TorrentSearch {
         let requested = season.map { Set([$0]) } ?? seasons
         func feed(account: String) async throws -> [TorrentResult] {
             let verified = account.lowercased() == "trusted"
-            var query = ["page": "rss", "q": query, "c": "1_0", "f": verified ? "2" : "0"]
+            let resolved = TorrentQuery(query).resolvedTitle
+            var query = ["page": "rss", "q": resolved, "c": "1_0", "f": verified ? "2" : "0"]
             if !verified { query["u"] = account }
             let url = HTTP.endpoint("https://nyaa.si/", query)
             let data = try await HTTP.data(url)
@@ -238,6 +298,29 @@ enum TorrentSearch {
         return files
     }
 
+    static func directSelection(_ preview: TorrentPreview, for row: TorrentResult, seasons: Set<Int>) -> Set<Int>? {
+        let videos = preview.files.filter { $0.isVideo && $0.path.match(Indexer.musicVideos) == nil }
+        guard !videos.isEmpty, row.seasons.count <= 1 else { return nil }
+        if let season = row.season {
+            guard (seasons.isEmpty || seasons.contains(season)),
+                  videos.allSatisfy({ $0.season == nil || $0.season == season }) else { return nil }
+        } else if !seasons.isEmpty {
+            return nil
+        }
+        if let episode = row.episode {
+            let matching = videos.filter { $0.episode == episode }
+            if matching.count == 1 { return [matching[0].id] }
+            if videos.count == 1, videos[0].episode == nil { return [videos[0].id] }
+            return nil
+        }
+        if row.isPack, row.season != nil {
+            let numbers = videos.compactMap(\.episode)
+            guard Set(numbers).count == numbers.count else { return nil }
+            return Set(videos.map(\.id))
+        }
+        return videos.count == 1 ? [videos[0].id] : nil
+    }
+
     static func preview(_ item: TorrentResult) async throws -> TorrentPreview {
         guard !item.torrent.isFileURL else { throw Notice("Le fichier torrent local n’est plus disponible.") }
         let data = try await HTTP.data(item.torrent)
@@ -253,6 +336,19 @@ enum TorrentSearch {
         let total = result.preview.bytes()
         let size = ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
         return (TorrentResult(id: result.hash, title: result.name, torrent: url, seeds: 0, size: size, bytes: Double(total), trusted: false), result.preview)
+    }
+
+    static func legacySelection(_ data: Data) throws -> (folder: String, selected: Set<Int>)? {
+        guard data.count < 8_000_000 else { return nil }
+        var reader = Bencode(bytes: Array(data))
+        let entry = try reader.read()
+        guard entry["qBt-category"]?.string == "Yoru",
+              (entry["qBt-contentLayout"]?.string ?? "Original") == "Original",
+              let folder = entry["qBt-savePath"]?.string ?? entry["save_path"]?.string,
+              let priorities = entry["file_priority"]?.list else { return nil }
+        return (folder, Set(priorities.enumerated().compactMap { i, value in
+            (value.int ?? 0) > 0 ? i : nil
+        }))
     }
 
     private static func decode(_ data: Data, expectedHash: String?) throws -> (preview: TorrentPreview, hash: String, name: String) {

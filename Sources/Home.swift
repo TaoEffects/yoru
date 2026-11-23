@@ -12,10 +12,8 @@ struct HomeView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 27) {
                 hero
-                if model.allowsDownloads {
-                    if let offer = model.suggestedSeason { SeasonOfferCard(offer: offer, model: model, opensProfile: true) }
-                    DiscoveredView(model: model)
-                }
+                if model.allowsDownloads, let offer = model.suggestedSeason { SeasonOfferCard(offer: offer, model: model, opensProfile: true) }
+                DiscoveredView(model: model)
                 if !model.series.isEmpty { libraryShelf }
             }
             .frame(maxWidth: 1490)
@@ -28,15 +26,17 @@ struct HomeView: View {
         let resume = model.continuing
         let feature = showRecommendations && model.allowsDownloads ? model.nautiljonRecommendations.first ?? model.recommendations.first : nil
         let progress = resume.map(model.progress)
+        let title = resume?.title ?? feature?.entry.title.english ?? feature?.entry.name ?? "Ta bibliothèque"
         return GeometryReader { geometry in
             HStack {
                 VStack(alignment: .leading, spacing: 11) {
                     Text(labels(resume == nil ? "À découvrir" : "Reprendre"))
                         .font(YoruTypography.text(14, strong: true)).foregroundStyle(heroAccent)
-                    Text(resume?.title ?? feature?.entry.title.english ?? feature?.entry.name ?? "Ta bibliothèque")
-                        .font(YoruTypography.display(geometry.size.width > 1050 ? 62 : 51))
-                        .lineLimit(2).minimumScaleFactor(0.72)
+                    Text(title)
+                        .font(YoruTypography.display(geometry.size.width > 1050 ? 54 : 46))
+                        .lineLimit(3).minimumScaleFactor(0.72)
                         .accessibilityAddTraits(.isHeader)
+                        .help(title)
                     if let resume, let progress {
                         HStack(spacing: 7) {
                             if resume.number != nil {
@@ -55,18 +55,17 @@ struct HomeView: View {
                     Button {
                         if let resume { model.play(resume) }
                         else if let feature { model.present(feature) }
-                        else if model.series.isEmpty { model.chooseFolder(thenOpenLibrary: true) }
                         else { model.tab = .library }
                     } label: {
-                        Label(labels(resume != nil ? "Reprendre la lecture" : feature != nil ? "Voir la fiche" :
-                            model.series.isEmpty ? "Choisir un dossier" : "Ouvrir la bibliothèque"),
+                        Label(labels(resume != nil ? "Reprendre la lecture" : feature == nil ? "Ouvrir la bibliothèque" : "Voir la fiche"),
                               systemImage: resume != nil ? "play.fill" : feature == nil ? "square.grid.2x2" : "arrow.right")
                     }.buttonStyle(ControlStyle(accent: true))
-                }.frame(width: geometry.size.width * 0.56, alignment: .leading)
+                }.frame(width: geometry.size.width * (geometry.size.width < 850 ? 0.68 : 0.58), alignment: .leading)
                 Spacer(minLength: 0)
             }
             .padding(.leading, geometry.size.width > 1000 ? 34 : 26)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .padding(.vertical, 19)
         }
         .frame(height: progress == nil ? 310 : 334)
         .foregroundStyle(.white)
@@ -141,7 +140,7 @@ struct DiscoveredView: View {
     }
 
     var body: some View {
-        if showRecommendations {
+        if showRecommendations && model.allowsDownloads {
             VStack(alignment: .leading, spacing: 12) {
                 if model.state.nautiljonWatchlist?.isEmpty == false {
                     HStack {
@@ -170,7 +169,7 @@ struct DiscoveredView: View {
         }
     }
 
-    private var cardWidth: CGFloat { compact ? 230 : 166 }
+    private var cardWidth: CGFloat { compact ? 240 : 166 }
     private var columnSpacing: CGFloat { compact ? 10 : 15 }
 
     private func cards(_ items: [Discovery], limit: Int) -> some View {
@@ -178,20 +177,17 @@ struct DiscoveredView: View {
         return LazyVGrid(columns: [GridItem(.adaptive(minimum: cardWidth), spacing: columnSpacing, alignment: .topLeading)],
                   alignment: .leading, spacing: 17) {
             ForEach(Array(items.prefix(limit))) { item in
-                VStack(alignment: .leading, spacing: 7) {
-                    Button { model.present(item) } label: {
-                        if compact { compactCard(item) }
-                        else {
-                            DiscoveryPoster(title: item.entry.title.english ?? item.entry.name,
-                                            url: item.entry.coverImage?.large, reason: showReason ? item.reason ?? "" : nil)
+                Group {
+                    if compact { compactCard(item) }
+                    else {
+                        let title = item.entry.title.english ?? item.entry.name
+                        Button { model.present(item) } label: {
+                            DiscoveryPoster(title: title, url: item.entry.coverImage?.large,
+                                            reason: showReason ? item.reason ?? "" : nil)
                         }
-                    }
-                    .buttonStyle(DirectionalPlainStyle(radius: 12))
-                    .accessibilityLabel(labels("Voir la fiche") + " · " + item.entry.name)
-                    if compact, !["NOT_YET_RELEASED", "CANCELLED"].contains(item.entry.status ?? "") {
-                        Button { model.downloadRecommendation(item) } label: {
-                            DownloadLabel(title: labels(downloadLabel(item))).frame(minHeight: 36, alignment: .leading)
-                        }.buttonStyle(ControlStyle(horizontalPadding: 10)).disabled(model.addingTorrent)
+                        .buttonStyle(DirectionalPlainStyle(radius: 12))
+                        .accessibilityLabel(labels("Voir la fiche") + " · " + title)
+                        .help(title)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -205,12 +201,57 @@ struct DiscoveredView: View {
     }
 
     private func compactCard(_ item: Discovery) -> some View {
-        HStack(spacing: 9) {
-            CoverArt(url: item.entry.coverImage?.large, width: 42, height: 58, radius: 6)
-            Text(item.entry.title.english ?? item.entry.name)
-                .font(YoruTypography.text(14, strong: true)).lineLimit(2)
-            Spacer(minLength: 0)
-        }.padding(8).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+        let entry = item.entry
+        let fullTitle = entry.title.english ?? entry.name
+        let parts = fullTitle.split(separator: ":", maxSplits: 1).map { String($0).trimmed }
+        let subtitle = parts.count == 2 && (entry.isFilm || fullTitle.count > 45) ? parts[1] : nil
+        let season = [entry.title.english, entry.title.romaji].compactMap { $0 }.lazy.compactMap(SeasonNumber.first).first
+        let mainTitle = subtitle == nil ? fullTitle : parts[0]
+        let title = season == nil ? mainTitle : SeasonNumber.base(mainTitle)
+        let romaji = entry.title.romaji.map { name in
+            let base = subtitle == nil ? name : String(name.prefix(while: { $0 != ":" })).trimmed
+            return season == nil ? base : SeasonNumber.base(base)
+        }
+        let shorterTitle = romaji.flatMap { !$0.isEmpty && $0.count + 8 < title.count ? $0 : nil }
+        let format = entry.isFilm ? "Film" : season.map { "Saison \($0)" }
+            ?? (entry.status == "RELEASING" ? "En cours" : "Série")
+        let detail = [labels(format), subtitle].compactMap { $0 }.joined(separator: " · ")
+
+        return VStack(alignment: .leading, spacing: 10) {
+            Button { model.present(item) } label: {
+                HStack(spacing: 10) {
+                    CoverArt(url: entry.coverImage?.large, width: 42, height: 59, radius: 7)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(shorterTitle ?? title)
+                            .font(YoruTypography.text(15, strong: true)).lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(detail).font(YoruTypography.text(13)).foregroundStyle(theme.mutedText).lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(height: 62)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(DirectionalPlainStyle(radius: 8))
+            .accessibilityLabel(labels("Voir la fiche") + " · " + fullTitle)
+            .help(fullTitle)
+
+            if ["NOT_YET_RELEASED", "CANCELLED"].contains(entry.status ?? "") {
+                Text(labels(entry.status == "CANCELLED" ? "Annulé" : "À venir"))
+                    .font(YoruTypography.text(15, strong: true)).foregroundStyle(theme.mutedText)
+                    .frame(maxWidth: .infinity, minHeight: 42)
+            } else {
+                let action = labels(downloadLabel(item))
+                Button { model.downloadRecommendation(item) } label: {
+                    DownloadLabel(title: labels("Télécharger")).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(ControlStyle(horizontalPadding: 12))
+                .disabled(model.addingTorrent)
+                .help(action)
+                .accessibilityLabel(action + " · " + fullTitle)
+            }
+        }
+        .padding(11)
     }
 }
 
@@ -342,6 +383,7 @@ struct WatchlistGallery: View {
         .buttonStyle(DirectionalPlainStyle(radius: 12))
         .modifier(RecommendationHover(compact: false))
         .accessibilityLabel(labels("Voir la fiche") + " · " + title)
+        .help(title)
         .onAppear { if suggestion == nil { artwork.show(row) } }
         .onDisappear { artwork.hide(row) }
     }

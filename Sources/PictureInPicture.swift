@@ -4,6 +4,7 @@ import Darwin
 
 final class VideoHostView: NSView {
     var didAttachToWindow: ((NSWindow) -> Void)?
+    private weak var surface: VideoSurface?
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -11,6 +12,7 @@ final class VideoHostView: NSView {
     }
 
     func show(_ surface: VideoSurface) {
+        self.surface = surface
         if surface.superview !== self {
             surface.removeFromSuperview()
             surface.frame = bounds
@@ -18,6 +20,12 @@ final class VideoHostView: NSView {
             addSubview(surface)
         }
         surface.layer?.setNeedsDisplay()
+    }
+
+    override func layout() {
+        super.layout()
+        guard let surface, surface.superview === self, surface.frame != bounds else { return }
+        surface.frame = bounds
     }
 }
 
@@ -217,15 +225,30 @@ final class VideoHostView: NSView {
               controller.responds(to: Self.presentation), controller.responds(to: Self.delegate),
               controller.responds(to: Self.playing), controller.responds(to: Self.aspect) else { return nil }
         self.controller = controller
-        host = VideoHostView(frame: NSRect(origin: .zero, size: CGSize(width: 480, height: 480 * aspectRatio.height / aspectRatio.width)))
-        host.wantsLayer = true
-        host.layer?.backgroundColor = NSColor.black.cgColor
-        content.view = host
+        let frame = NSRect(origin: .zero, size: CGSize(width: 480, height: 480 * aspectRatio.height / aspectRatio.width))
+        host = VideoHostView(frame: frame)
+        content.view = Self.container(for: host)
         content.title = title
         controller.title = title
         controller.perform(Self.delegate, with: delegate)
         typealias SetAspect = @convention(c) (AnyObject, Selector, CGSize) -> Void
         unsafeBitCast(controller.method(for: Self.aspect), to: SetAspect.self)(controller, Self.aspect, aspectRatio)
+    }
+
+    private static func container(for host: VideoHostView) -> NSView {
+        let container = NSView(frame: host.frame)
+        container.autoresizingMask = [.width, .height]
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor.black.cgColor
+        host.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(host)
+        NSLayoutConstraint.activate([
+            host.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            host.topAnchor.constraint(equalTo: container.topAnchor),
+            host.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
+        return container
     }
 
     func present() { controller.perform(Self.presentation, with: content) }

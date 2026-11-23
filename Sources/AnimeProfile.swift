@@ -116,7 +116,8 @@ struct AnimeProfileView: View {
             CoverArt(url: cover, width: 116, height: 164, radius: 13)
             VStack(alignment: .leading, spacing: 13) {
                 Text(title).font(YoruTypography.display(43))
-                    .lineLimit(3).minimumScaleFactor(0.67).accessibilityAddTraits(.isHeader)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
                 if let entry {
                     HStack(spacing: 14) {
                         if entry.isFilm {
@@ -132,25 +133,31 @@ struct AnimeProfileView: View {
                     }
                     .font(YoruTypography.text(16, strong: true)).foregroundStyle(.white.opacity(0.86))
                 }
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     if unavailable {
                         Text(labels(entry?.status == "CANCELLED" ? "Annulé" : "À venir"))
                     } else {
                         Button {
                             model.downloadPresentedAnime(presentation, entry: entry)
                         } label: {
-                            DownloadLabel(title: labels(downloadTitle), busy: model.addingTorrent)
+                            DownloadLabel(title: labels(model.addingTorrent ? "Préparation…" : "Télécharger"),
+                                          busy: model.addingTorrent)
                         }
                         .buttonStyle(ControlStyle(accent: true))
                         .disabled(model.addingTorrent)
+                        .help(labels(downloadTitle))
+                        .accessibilityLabel(labels(downloadTitle))
                         if entry != nil || presentation.season != nil {
-                            Button(labels("Choisir une version")) {
+                            Button {
                                 model.presentedAnime = nil
                                 if let season = presentation.season { model.findSeason(season) }
                                 else if let entry { model.findRecommendation(Discovery(entry: entry, reason: nil)) }
+                            } label: {
+                                Label(labels("Versions"), systemImage: "list.bullet")
                             }
                             .buttonStyle(ControlStyle())
                             .disabled(model.addingTorrent)
+                            .help(labels("Choisir une version"))
                         }
                     }
                 }
@@ -235,7 +242,7 @@ struct DownloadLabel: View {
                         .transition(.opacity)
                 }
             }.frame(width: 19, height: 19).accessibilityHidden(true)
-            Text(title).lineLimit(2)
+            Text(title).lineLimit(2).fixedSize(horizontal: false, vertical: true)
         }
         .onHover { hovered = $0 }
         .animation(reduceMotion || lightweight ? nil : YoruMotion.focus, value: hovered)

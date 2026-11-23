@@ -42,6 +42,8 @@ import UniformTypeIdentifiers
     @Published var transferStatus = ""
     @Published var search = ""
     @Published var torrentResults: [TorrentResult] = []
+    @Published private(set) var directDownloadID: String?
+    @Published private(set) var queuedSearchDownloads: Set<String> = []
     @Published var packs: Bool?
     @Published var recommendations: [Discovery] = []
     @Published private(set) var nautiljonRecommendations: [Discovery] = []
@@ -51,7 +53,8 @@ import UniformTypeIdentifiers
     private var checkingSeasons: Set<String> = []
     private var checkedSeasons: [String: Date] = [:]
     private var searchTask: Task<Void, Never>?
-    private var searchGeneration = 0
+    @Published private(set) var searchGeneration = 0
+    private var submittedSearchTitle = ""
     @Published var recommending = false
     @Published var librarySeason: Int?
     @Published private(set) var introCountdown: Int?
@@ -88,7 +91,7 @@ import UniformTypeIdentifiers
     private var subtitleFile: URL?
     private var activeTransferPaths: Set<String> = []
     private var downloadSeries: Series?
-    private var requestedSeasons: Set<Int> = []
+    @Published private(set) var requestedSeasons: Set<Int> = []
     private var requestedEpisode: Int?
     private var scanCount = 0
     private let selfTest = CommandLine.arguments.contains("--self-test")
@@ -1258,31 +1261,34 @@ import UniformTypeIdentifiers
     }
 
     func searchTorrents() {
-        guard !search.trimmed.isEmpty else { return }
+        guard !search.trimmed.isEmpty, !addingTorrent else { return }
         searchTask?.cancel()
         searchGeneration += 1
         let generation = searchGeneration
         searching = true
         downloadMessage = ""
         torrentResults = []
-        let query = search.trimmed
+        queuedSearchDownloads = []
+        let query = TorrentQuery(search)
         let packMode = packs
-        let episode = packMode == true ? nil : Int(episodeNumber)
+        let episode = packMode == true ? nil : query.episode ?? Int(episodeNumber.trimmed)
         let tokens = seasonNumber.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-        let seasons = Set(tokens.compactMap(Int.init))
-        if (!episodeNumber.isEmpty && packMode != true && episode == nil) ||
-           tokens.contains(where: { Int($0).map { !(1...99).contains($0) } ?? true }) {
+        let seasons = query.season.map { Set([$0]) } ?? Set(tokens.compactMap(Int.init))
+        if query.title.isEmpty || episode.map({ $0 < 1 }) == true || seasons.contains(where: { !(1...99).contains($0) }) ||
+           (!episodeNumber.trimmed.isEmpty && packMode != true && episode == nil) ||
+           (query.season == nil && tokens.contains(where: { Int($0) == nil })) {
             searching = false
             downloadMessage = "Saisis un numéro de saison ou d’épisode valide."
             return
         }
         requestedSeasons = seasons
         requestedEpisode = episode
+        submittedSearchTitle = query.resolvedTitle
         searchTask = Task {
             defer { if generation == searchGeneration { searching = false } }
             do {
                 let defaults = UserDefaults.standard
-                let rows = try await TorrentSearch.search(query, groups: defaults.string(forKey: "torrentGroups") ?? NyaaSource.defaults,
+                let rows = try await TorrentSearch.search(query.resolvedTitle, groups: defaults.string(forKey: "torrentGroups") ?? NyaaSource.defaults,
                     minimumSeeds: defaults.object(forKey: "minimumSeeds") as? Int ?? 8, packs: packMode, episode: episode, seasons: seasons)
                 guard !Task.isCancelled, generation == searchGeneration else { return }
                 torrentResults = rows
@@ -1320,33 +1326,63 @@ import UniformTypeIdentifiers
     func addTorrent() {
         guard let inspected, let preview, !chosenFiles.isEmpty, !addingTorrent else { return }
         let selected = chosenFiles
-        let source = downloadSeries.map { $0.query.normalized == search.trimmed.normalized || SeasonNumber.base($0.query).normalized == search.trimmed.normalized } == true
-            ? downloadSeries
-            : series.first { $0.query.normalized == search.trimmed.normalized }
-        let title = ReleaseName(inspected.title).title.replacingOccurrences(of: "/", with: "／").trimmed
-        let safeName = [".", "..", ""].contains(title) ? inspected.id : title
-        let folder = downloadFolder.appendingPathComponent(safeName, isDirectory: true)
-        let onlySeason = !inspected.torrent.isFileURL && requestedSeasons.count == 1 ? requestedSeasons.first : nil
-        let matchingShow = inspected.torrent.isFileURL ? nil : source
         addingTorrent = true
         downloadMessage = ""
         Task {
             defer { addingTorrent = false }
             do {
-                try await torrent.add(inspected, preview: preview, selected: selected, folder: folder)
-                if let source = matchingShow {
-                    state.downloadFolders = (state.downloadFolders ?? [:]).merging([safeName: source.id]) { _, latest in latest }
-                    if let season = onlySeason, preview.files.contains(where: { selected.contains($0.id) && $0.isVideo && $0.episode == 1 }) {
-                        state.transferSeasons = (state.transferSeasons ?? [:]).merging([inspected.id: source.id + "|" + String(season)]) { _, latest in latest }
-                    }
-                    persist()
-                }
+                try await queueSearchDownload(inspected, preview: preview, selected: selected)
                 self.inspected = nil
-                focusedTransfer = inspected.id
                 downloadPane = .transfers
-                await checkTransfers(force: true)
             } catch { downloadMessage = error.localizedDescription }
         }
+    }
+
+    func downloadSearchResult(_ item: TorrentResult) {
+        guard !addingTorrent, !queuedSearchDownloads.contains(item.id), !activeTransfers.contains(where: { $0.id == item.id }) else { return }
+        guard UserDefaults.standard.object(forKey: "automaticDownloadSelection") as? Bool != false else { inspect(item); return }
+        addingTorrent = true
+        directDownloadID = item.id
+        downloadMessage = ""
+        let root = downloadFolder
+        Task {
+            defer { addingTorrent = false; directDownloadID = nil }
+            do {
+                let result = try await TorrentSearch.preview(item)
+                guard root == downloadFolder else { throw Notice("Le dossier de la bibliothèque a changé. Relance le téléchargement.") }
+                guard let files = TorrentSearch.directSelection(result, for: item, seasons: requestedSeasons) else {
+                    inspected = item
+                    preview = result
+                    chosenFiles = []
+                    preparingPreview = false
+                    downloadMessage = "Vérifie les fichiers à récupérer pour cette version."
+                    return
+                }
+                try await queueSearchDownload(item, preview: result, selected: files)
+            } catch { downloadMessage = error.localizedDescription }
+        }
+    }
+
+    private func queueSearchDownload(_ item: TorrentResult, preview: TorrentPreview, selected: Set<Int>) async throws {
+        let query = submittedSearchTitle.normalized
+        let source = item.torrent.isFileURL ? nil : ([downloadSeries].compactMap { $0 } + series).first {
+            $0.query.normalized == query || SeasonNumber.base($0.query).normalized == query
+        }
+        let title = ReleaseName(item.title).title.replacingOccurrences(of: "/", with: "／").trimmed
+        let safeName = [".", "..", ""].contains(title) ? item.id : title
+        let folder = downloadFolder.appendingPathComponent(safeName, isDirectory: true)
+        let season = requestedSeasons.count == 1 ? requestedSeasons.first : item.season
+        try await torrent.add(item, preview: preview, selected: selected, folder: folder)
+        if let source {
+            state.downloadFolders = (state.downloadFolders ?? [:]).merging([safeName: source.id]) { _, latest in latest }
+            if let season, preview.files.contains(where: { selected.contains($0.id) && $0.isVideo && $0.episode == 1 }) {
+                state.transferSeasons = (state.transferSeasons ?? [:]).merging([item.id: source.id + "|" + String(season)]) { _, latest in latest }
+            }
+            persist()
+        }
+        queuedSearchDownloads.insert(item.id)
+        focusedTransfer = item.id
+        await checkTransfers(force: true)
     }
 
     func checkTransfers(force: Bool = false) async {

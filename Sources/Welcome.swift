@@ -67,6 +67,7 @@ struct WelcomeView: View {
         GeometryReader { geometry in
             ScrollView {
                 VStack(alignment: .leading, spacing: 25) {
+                    LanguageChoice()
                     heading
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 212), spacing: 12)], spacing: 12) {
                         ForEach(YoruUsageMode.allCases) { mode in card(mode) }
@@ -124,7 +125,7 @@ struct WelcomeView: View {
                 .frame(height: 31)
                 .accessibilityHidden(true)
                 Text(labels(mode.title)).font(YoruTypography.text(23, strong: true))
-                Text(mode.detail)
+                Text(L.tr(mode.detail))
                     .font(YoruTypography.text(16)).foregroundStyle(theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
             }

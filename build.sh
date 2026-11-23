@@ -20,6 +20,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$FRAMEWORKS" obj
 cp Info.plist "$APP/Contents/"
 cp retime.py "$APP/Contents/Resources/"
 cp -R Resources/Fonts "$APP/Contents/Resources/"
+cp -R Resources/Localizations "$APP/Contents/Resources/"
+for locale_folder in Resources/*.lproj; do
+  [[ -d "$locale_folder" ]] && cp -R "$locale_folder" "$APP/Contents/Resources/"
+done
 
 arm_libraries="$MPV/libmpv-$MPV_VERSION-macos-arm64/lib"
 intel_libraries="$MPV/libmpv-$MPV_VERSION-macos-x86_64/lib"

@@ -16,7 +16,7 @@ struct Stage: View {
     private final class Visibility { var lastActivity = 0.0 }
     @State private var visibility = Visibility()
     @State private var seekValue: Double?
-    @State private var controlsHeight: CGFloat = 81
+    @State private var footerHeight: CGFloat = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.yoruLabels) private var labels
     @AppStorage("lightweight") private var lightweight = false
@@ -33,21 +33,35 @@ struct Stage: View {
     @AppStorage("autoAdvanceAtEnding") private var autoAdvanceAtEnding = true
     @AppStorage("englishInSubtitleCycle") private var englishInSubtitleCycle = false
     @AppStorage("introBehavior") private var introBehavior: IntroBehavior = .adaptive
+    private let playlistWidth: CGFloat = 232
 
-    private struct ControlsHeight: PreferenceKey {
+    private struct FooterHeight: PreferenceKey {
         static let defaultValue: CGFloat = 0
         static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
     }
 
     var body: some View {
+        GeometryReader { geometry in
+            stage(compactControls: geometry.size.width - (queue ? playlistWidth + 9 : 0) < 680)
+        }
+    }
+
+    private func stage(compactControls: Bool) -> some View {
         HStack(spacing: 0) {
             ZStack {
                 Color.black.ignoresSafeArea(.container, edges: .top)
                 VideoView(player: player).ignoresSafeArea(.container, edges: .top).accessibilityHidden(true)
                 if let episode = model.current {
-                    Rectangle().fill(.clear).contentShape(Rectangle())
-                        .gesture(TapGesture(count: 2).onEnded { NSApp.keyWindow?.toggleFullScreen(nil) }
-                            .exclusively(before: TapGesture().onEnded { queue = false; model.closePlayerDownloads(); activity() }))
+                    PlaybackSurfaceInput(player: player, mediaID: episode.id,
+                                         enabled: player.loaded && !player.pictureInPictureActive && !model.settings
+                                             && !model.playerDownloadsOpen && !subtitlePanel && !audioOutputPanel) {
+                        queue = false
+                        model.closePlayerDownloads()
+                        activity()
+                    } doubleClick: {
+                        NSApp.keyWindow?.toggleFullScreen(nil)
+                    }
+                    .accessibilityHidden(true)
                     if player.pictureInPictureActive {
                         Button { player.stopPictureInPicture() } label: {
                             Label(labels("Revenir au lecteur"), systemImage: "pip.exit")
@@ -63,60 +77,48 @@ struct Stage: View {
                             }.padding(.horizontal, 17).padding(.vertical, 11)
                                 .modifier(VideoGlass(radius: 23))
                         }
-                        Spacer()
-                        HStack {
-                            Spacer()
-                            if let countdown = nextCountdown {
-                                HStack(spacing: 6) {
-                                    Button(labels("Rester")) { ending.resolved = true; nextCountdown = nil }.buttonStyle(ControlStyle())
-                                    Button { model.startNextEpisode() } label: {
-                                        Label(labels("Épisode suivant · \(countdown) s"), systemImage: "play.fill")
-                                    }.buttonStyle(ControlStyle(accent: true))
-                                }.padding(6).modifier(Glass(radius: 100, tint: .black.opacity(0.45), fallback: .black.opacity(0.70)))
-                            } else if let skip = player.currentSkip {
-                                HStack(spacing: 6) {
-                                    if skip.kind == "op", !model.introKept, introBehavior != .manual {
-                                        Button(labels("Garder l’intro")) { model.keepIntro() }.buttonStyle(ControlStyle()).help("Annule le saut automatique")
-                                    }
-                                    Button { model.skipSegment(skip) } label: {
-                                        Label(labels(model.introCountdown.map { "\(skip.label) · \($0) s" } ?? skip.label), systemImage: "forward.end.fill")
-                                    }.buttonStyle(ControlStyle(accent: true)).help("Raccourci S")
-                                }.padding(6).modifier(Glass(radius: 100, tint: .black.opacity(0.45), fallback: .black.opacity(0.70)))
-                            } else if model.introUndo != nil {
-                                Button(labels("Revoir l’intro")) { model.undoIntro() }
-                                    .buttonStyle(ControlStyle()).padding(6)
-                            } else if player.paused, player.duration > 0, player.position >= player.duration - 1, model.next != nil {
-                                Button(labels("Épisode suivant")) { model.startNextEpisode() }.buttonStyle(ControlStyle(accent: true))
-                            }
-                        }
-                        if controls || player.paused || subtitlePanel {
-                            if model.allowsDownloads, let offer = model.seasonOffer(for: episode) {
-                                HStack {
-                                    Spacer()
-                                    if offer.announced {
-                                        Text("Saison \(offer.next) annoncée").padding(8).background(.black.opacity(0.7), in: Capsule())
-                                    } else {
-                                        Button { model.downloadSeason(offer, inPlayer: true) } label: {
-                                            Label(labels("Télécharger la saison \(offer.next)"), systemImage: "arrow.down.to.line")
-                                        }.buttonStyle(ControlStyle()).disabled(model.addingTorrent)
-                                            .padding(4).background(.black.opacity(0.7), in: Capsule())
+                        Spacer(minLength: 10)
+                        VStack(alignment: .leading, spacing: 5) {
+                            playbackNotice
+                            if controls || player.paused || subtitlePanel {
+                                if let offer = model.seasonOffer(for: episode) {
+                                    HStack {
+                                        Spacer()
+                                        if offer.announced {
+                                            Text("Saison \(offer.next) annoncée").padding(8).background(.black.opacity(0.7), in: Capsule())
+                                        } else {
+                                            Button { model.downloadSeason(offer, inPlayer: true) } label: {
+                                                Label(labels("Télécharger la saison \(offer.next)"), systemImage: "arrow.down.to.line")
+                                            }.buttonStyle(ControlStyle()).disabled(model.addingTorrent)
+                                                .padding(4).background(.black.opacity(0.7), in: Capsule())
+                                        }
                                     }
                                 }
+                                if !model.playerDownloadsOpen, let transfer = model.activeTransfers.first(where: { $0.id == model.focusedTransfer }) ?? model.activeTransfers.first {
+                                    Button { model.openPlayerDownloads() } label: {
+                                        HStack(spacing: 8) {
+                                            Image(systemName: "arrow.down.circle.fill")
+                                            Text(transfer.label).lineLimit(1)
+                                            ProgressView(value: transfer.fraction).frame(width: 70).tint(mint)
+                                            Text(transfer.fraction.formatted(.percent.precision(.fractionLength(0)))).monospacedDigit()
+                                        }.font(.caption.weight(.semibold)).padding(8)
+                                            .background(.black.opacity(0.68), in: Capsule())
+                                    }.buttonStyle(DirectionalPlainStyle()).help("Voir les transferts")
+                                }
+                                controlsBar(compact: compactControls)
                             }
-                            if model.allowsDownloads, !model.playerDownloadsOpen, let transfer = model.activeTransfers.first(where: { $0.id == model.focusedTransfer }) ?? model.activeTransfers.first {
-                                Button { model.openPlayerDownloads() } label: {
-                                    HStack(spacing: 8) {
-                                        Image(systemName: "arrow.down.circle.fill")
-                                        Text(transfer.label).lineLimit(1)
-                                        ProgressView(value: transfer.fraction).frame(width: 70).tint(mint)
-                                        Text(transfer.fraction.formatted(.percent.precision(.fractionLength(0)))).monospacedDigit()
-                                    }.font(.caption.weight(.semibold)).padding(8)
-                                      .background(.black.opacity(0.68), in: Capsule())
-                                }.buttonStyle(DirectionalPlainStyle()).help("Voir les transferts")
-                            }
-                            controlsBar
                         }
-                    }.padding(.horizontal, 20).padding(.top, 18 + navigationClearance).padding(.bottom, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background {
+                            GeometryReader { geometry in
+                                Color.clear.preference(key: FooterHeight.self, value: geometry.size.height)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 20).padding(.top, 18 + navigationClearance).padding(.bottom, 6)
+                    .opacity(model.playerDownloadsOpen ? 0 : 1)
+                    .allowsHitTesting(!model.playerDownloadsOpen)
+                    .accessibilityHidden(model.playerDownloadsOpen)
                 } else {
                     VStack(spacing: 14) {
                         Image(systemName: "play.rectangle").font(.system(size: 58, weight: .thin)).foregroundStyle(mint)
@@ -134,6 +136,19 @@ struct Stage: View {
             .background {
                 EventActivity { _ in activity() }.frame(width: 0, height: 0)
             }
+            .overlay {
+                Group {
+                    if player.speedBoosted {
+                        Label("×2", systemImage: "forward.fill")
+                            .font(YoruTypography.text(18, strong: true))
+                            .padding(.horizontal, 18).padding(.vertical, 10)
+                            .modifier(VideoGlass(radius: 100))
+                            .accessibilityLabel(labels("Vitesse ×2"))
+                            .transition(.opacity.combined(with: .scale(scale: 0.94)))
+                    }
+                }
+                .allowsHitTesting(false)
+            }
             .overlay(alignment: .trailing) {
                 if model.playerDownloadsOpen {
                     DownloadView(model: model, inPlayer: true)
@@ -142,22 +157,24 @@ struct Stage: View {
                         .modifier(Glass(radius: 27, tint: .black.opacity(0.62), fallback: panel))
                         .shadow(color: .black.opacity(0.4), radius: 18, x: -6)
                         .padding(.horizontal, 12).padding(.bottom, 12).padding(.top, 12 + navigationClearance)
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                        .transition(bounceButtons ? YoruMotion.panel : .identity)
                         .environment(\.yoruTheme, .nuit)
                         .environment(\.directionalLayer, 1)
                 }
             }
-            if queue { playlist }
+            if queue { playlist.transition(bounceButtons ? YoruMotion.panel : .identity) }
         }
         .onAppear { activity(); updateSubtitleClearance() }
-        .onDisappear { NSCursor.setHiddenUntilMouseMoves(false); player.subtitleClearance(0, animated: false) }
-        .onPreferenceChange(ControlsHeight.self) { height in
-            guard height > 0 else { return }
-            controlsHeight = height
+        .onDisappear {
+            player.cancelSpeedBoost()
+            NSCursor.setHiddenUntilMouseMoves(false)
+            player.subtitleClearance(0, animated: false)
+        }
+        .onPreferenceChange(FooterHeight.self) { height in
+            footerHeight = height
             updateSubtitleClearance()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResizeNotification)) { _ in updateSubtitleClearance() }
-        .onChange(of: controls) { _ in updateSubtitleClearance() }
         .onChange(of: subtitlePanel) { open in
             if open { audioOutputPanel = false }
             activity()
@@ -170,8 +187,9 @@ struct Stage: View {
             if !enabled { audioOutputPanel = false }
         }
         .onChange(of: model.playerDownloadsOpen) { open in
-            if open { queue = false; audioOutputPanel = false }
+            if open { queue = false; audioOutputPanel = false; subtitlePanel = false }
             activity()
+            updateSubtitleClearance()
         }
         .onChange(of: fullscreen) { _ in queue = false; activity() }
         .onReceive(NotificationCenter.default.publisher(for: .yoruPlaybackActivity)) { _ in activity() }
@@ -201,13 +219,14 @@ struct Stage: View {
             if seekValue == nil, !subtitlePanel, !audioOutputPanel, !model.playerDownloadsOpen { model.introTick(); tickEnding() }
         }
         .animation(reduceMotion || lightweight ? nil : YoruMotion.reveal, value: controls)
-        .animation(reduceMotion || lightweight ? nil : YoruMotion.reveal, value: queue)
-        .animation(reduceMotion || lightweight ? nil : YoruMotion.reveal, value: model.playerDownloadsOpen)
+        .animation(bounceButtons ? YoruMotion.pageChange : nil, value: queue)
+        .animation(bounceButtons ? YoruMotion.pageChange : nil, value: model.playerDownloadsOpen)
+        .animation(bounceButtons ? YoruMotion.pageChange : nil, value: player.speedBoosted)
     }
 
     private func updateSubtitleClearance() {
-        let active = model.current != nil && !player.pictureInPictureActive && (controls || player.paused || subtitlePanel)
-        player.subtitleClearance(active ? max(0, controlsHeight - 10) : 0, animated: !reduceMotion && !lightweight)
+        let active = model.current != nil && !player.pictureInPictureActive && !model.playerDownloadsOpen
+        player.subtitleClearance(active ? max(0, footerHeight - 10) : 0, animated: !reduceMotion && !lightweight)
     }
 
     private func activity() {
@@ -241,28 +260,78 @@ struct Stage: View {
 
     private var bounceButtons: Bool { animatePlaybackButtons && !reduceMotion && !lightweight }
 
-    private var controlsBar: some View {
+    private var playbackNotice: some View {
+        ZStack(alignment: .trailing) {
+            if let countdown = nextCountdown {
+                HStack(spacing: 6) {
+                    Button(labels("Rester")) { ending.resolved = true; nextCountdown = nil }
+                        .buttonStyle(ControlStyle())
+                    Button { model.startNextEpisode() } label: {
+                        Label(labels("Épisode suivant · \(countdown) s"), systemImage: "play.fill")
+                    }.buttonStyle(ControlStyle(accent: true))
+                }
+                .padding(6).modifier(VideoGlass(radius: 100))
+                .transition(bounceButtons ? YoruMotion.playbackNotice : .identity)
+            } else if let skip = player.currentSkip {
+                HStack(spacing: 6) {
+                    if skip.kind == "op", !model.introKept, introBehavior != .manual {
+                        Button(labels("Garder l’intro")) { model.keepIntro() }
+                            .buttonStyle(ControlStyle()).help("Annule le saut automatique")
+                    }
+                    Button { model.skipSegment(skip) } label: {
+                        Label(labels(model.introCountdown.map { "\(skip.label) · \($0) s" } ?? skip.label),
+                              systemImage: "forward.end.fill")
+                    }.buttonStyle(ControlStyle(accent: true)).help("Raccourci S")
+                }
+                .padding(6).modifier(VideoGlass(radius: 100))
+                .transition(bounceButtons ? YoruMotion.playbackNotice : .identity)
+            } else if model.introUndo != nil {
+                Button(labels("Revoir l’intro")) { model.undoIntro() }
+                    .buttonStyle(ControlStyle()).padding(6)
+                    .transition(bounceButtons ? YoruMotion.playbackNotice : .identity)
+            } else if player.paused, player.duration > 0, player.position >= player.duration - 1, model.next != nil {
+                Button(labels("Épisode suivant")) { model.startNextEpisode() }
+                    .buttonStyle(ControlStyle(accent: true))
+                    .transition(bounceButtons ? YoruMotion.playbackNotice : .identity)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .animation(bounceButtons ? YoruMotion.pageChange : nil, value: model.introUndo != nil)
+        .animation(bounceButtons ? YoruMotion.pageChange : nil, value: player.currentSkip?.kind)
+        .animation(bounceButtons ? YoruMotion.pageChange : nil, value: nextCountdown != nil)
+    }
+
+    private func controlsBar(compact: Bool) -> some View {
         VStack(spacing: 5) {
             PlaybackTimeline(player: player, episode: model.current, seekValue: $seekValue,
                              previewsEnabled: !model.playerDownloadsOpen && !subtitlePanel && !model.settings)
-            if showSeekButtons && queue {
+            if compact && (showSeekButtons || showAudioOutputButton) {
                 HStack(spacing: 6) {
-                    seekButton(forward: false)
-                    seekButton(forward: true)
+                    if showSeekButtons {
+                        seekButton(forward: false, compact: true)
+                        seekButton(forward: true, compact: true)
+                    }
+                    if showAudioOutputButton {
+                        AudioOutputControl(player: player, showingChoices: $audioOutputPanel, iconOnly: true, compact: true)
+                    }
                     Spacer()
                 }
             }
             HStack(spacing: 9) {
                 HStack(spacing: 6) {
-                    Image(systemName: player.volume == 0 ? "speaker.slash" : "speaker.wave.2")
-                        .onTapGesture { player.setVolume(player.volume == 0 ? 80 : 0) }
+                    Button { player.setVolume(player.volume == 0 ? 80 : 0) } label: {
+                        Image(systemName: player.volume == 0 ? "speaker.slash" : "speaker.wave.2")
+                            .frame(width: 20, height: 26)
+                    }
+                    .buttonStyle(DirectionalPlainStyle(radius: 8))
+                    .accessibilityLabel(labels(player.volume == 0 ? "Réactiver le son" : "Couper le son"))
                     Slider(value: Binding(get: { player.volume }, set: player.setVolume), in: 0...100)
-                        .frame(maxWidth: queue ? 60 : 85).tint(mint).accessibilityLabel("Volume")
+                        .frame(maxWidth: compact ? 60 : 85).tint(mint).accessibilityLabel("Volume")
                         .directionalValue { player.setVolume(player.volume + 5 * $0) }
-                    if showAudioOutputButton {
+                    if showAudioOutputButton && !compact {
                         AudioOutputControl(player: player, showingChoices: $audioOutputPanel, iconOnly: true)
                     }
-                    if showSeekButtons && !queue {
+                    if showSeekButtons && !compact {
                         seekButton(forward: false)
                         seekButton(forward: true)
                     }
@@ -273,34 +342,36 @@ struct Stage: View {
                         if let previous = model.previous { previousPulse += 1; model.play(previous) }
                     } label: {
                         Image(systemName: "backward.end.fill").playbackBounce(previousPulse, enabled: bounceButtons)
-                    }.buttonStyle(ControlStyle()).help("Épisode précédent").accessibilityLabel("Épisode précédent").disabled(model.previous == nil)
+                    }.buttonStyle(transportStyle(compact: compact)).help("Épisode précédent").accessibilityLabel("Épisode précédent").disabled(model.previous == nil)
                     Button { player.toggle() } label: {
                         Image(systemName: player.paused ? "play.fill" : "pause.fill")
                             .font(.system(size: 22, weight: .semibold))
                             .contentTransition(.opacity)
                             .animation(bounceButtons ? YoruMotion.selection : nil, value: player.paused)
                             .playbackBounce(player.paused, enabled: bounceButtons)
-                            .frame(width: 64, height: 48)
+                            .frame(width: compact ? 53 : 64, height: compact ? 40 : 48)
                             .foregroundStyle(.white)
                             .contentShape(Capsule())
                             .modifier(Glass(radius: 100, tint: mint.opacity(0.36), interactive: true,
                                             fallback: Color(red: 0.12, green: 0.35, blue: 0.29)))
-                    }.buttonStyle(DirectionalPlainStyle(radius: 100, priority: 3)).help("Lecture / pause · Espace").accessibilityLabel(player.paused ? "Lecture" : "Pause")
+                    }.buttonStyle(DirectionalPlainStyle(radius: 100, priority: 3))
+                        .help("Lecture / pause · Espace\nMaintenir Espace pour lire à ×2")
+                        .accessibilityLabel(player.paused ? "Lecture" : "Pause")
                     Button { nextPulse += 1; model.startNextEpisode() } label: {
                         Image(systemName: "forward.end.fill").playbackBounce(nextPulse, enabled: bounceButtons)
-                    }.buttonStyle(ControlStyle()).help("Épisode suivant").accessibilityLabel("Épisode suivant").disabled(model.next == nil)
+                    }.buttonStyle(transportStyle(compact: compact)).help("Épisode suivant").accessibilityLabel("Épisode suivant").disabled(model.next == nil)
                   }
                 }
                 HStack(spacing: 6) {
                 Button { model.cycleSubtitles(); reveal() } label: {
                     let active = player.tracks.first { $0.kind == "sub" && $0.id == player.activeSubtitle }?.shortLanguage
                     let label = active == "ja" ? "JP" : active?.uppercased().nonEmpty ?? "Aucun"
-                    if queue {
+                    if compact {
                         Image(systemName: "captions.bubble").accessibilityLabel("Sous-titres · " + label)
                     } else {
                         Label(label, systemImage: "captions.bubble")
                     }
-                }.buttonStyle(ControlStyle(selected: subtitlePanel))
+                }.buttonStyle(transportStyle(compact: compact, selected: subtitlePanel))
                     .background(SubtitleOptionsAnchor { subtitlePanel.toggle(); reveal() })
                     .popover(isPresented: $subtitlePanel, arrowEdge: .top) {
                         subtitles.environment(\.directionalLayer, 1)
@@ -320,24 +391,25 @@ struct Stage: View {
                 } label: {
                     Image(systemName: player.pictureInPictureActive ? "pip.exit" : "pip.enter")
                 }
-                .buttonStyle(ControlStyle(selected: player.pictureInPictureActive))
+                .buttonStyle(transportStyle(compact: compact, selected: player.pictureInPictureActive))
                 .help(labels(player.pictureInPictureActive ? "Revenir au lecteur" : "Image dans l’image"))
                 .accessibilityLabel(labels(player.pictureInPictureActive ? "Revenir au lecteur" : "Image dans l’image"))
                 .disabled(!player.loaded && !player.pictureInPictureActive)
-                Button { model.closePlayerDownloads(); queue.toggle() } label: { Image(systemName: "list.bullet") }.buttonStyle(ControlStyle(selected: queue)).help("Liste de lecture")
-                Button { NSApp.keyWindow?.toggleFullScreen(nil) } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }.buttonStyle(ControlStyle()).help("Plein écran · F")
+                Button { model.closePlayerDownloads(); queue.toggle() } label: { Image(systemName: "list.bullet") }
+                    .buttonStyle(transportStyle(compact: compact, selected: queue)).help("Liste de lecture").accessibilityLabel("Liste de lecture")
+                Button { NSApp.keyWindow?.toggleFullScreen(nil) } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
+                    .buttonStyle(transportStyle(compact: compact)).help("Plein écran · F").accessibilityLabel("Plein écran")
                 }.frame(maxWidth: .infinity, alignment: .trailing)
             }
         }.padding(.horizontal, 15).padding(.vertical, 7)
             .modifier(VideoGlass(radius: 28))
-            .background {
-                GeometryReader { geometry in
-                    Color.clear.preference(key: ControlsHeight.self, value: geometry.size.height)
-                }
-            }
     }
 
-    private func seekButton(forward: Bool) -> some View {
+    private func transportStyle(compact: Bool, selected: Bool = false) -> ControlStyle {
+        ControlStyle(selected: selected, horizontalPadding: compact ? 9 : 15, compact: compact)
+    }
+
+    private func seekButton(forward: Bool, compact: Bool = false) -> some View {
         let step = [5, 10, 15, 30].contains(seekButtonSeconds) ? seekButtonSeconds : 10
         let action = forward ? "Avancer de \(step) s" : "Reculer de \(step) s"
         return Button {
@@ -348,7 +420,7 @@ struct Stage: View {
             Image(systemName: "\(forward ? "goforward" : "gobackward").\(step)")
                 .font(.system(size: 17, weight: .semibold))
                 .playbackBounce(forward ? seekForward : seekBackward, enabled: bounceButtons)
-        }.buttonStyle(ControlStyle(horizontalPadding: 9))
+        }.buttonStyle(ControlStyle(horizontalPadding: 9, compact: compact))
             .help(labels(action)).accessibilityLabel(labels(action)).disabled(player.duration <= 0)
     }
 
@@ -443,7 +515,7 @@ struct Stage: View {
                     }.padding(.horizontal, 7)
                 }.onAppear { if let current = model.current { proxy.scrollTo(current.id) } }
             }
-        }.padding(.vertical, 17).frame(width: 232)
+        }.padding(.vertical, 17).frame(width: playlistWidth)
             .modifier(Glass(radius: 27, tint: .black.opacity(0.46), fallback: panel))
             .padding(.top, 9 + navigationClearance).padding(.bottom, 9).padding(.trailing, 9)
     }
@@ -460,6 +532,7 @@ private struct PlaybackTitle: View {
         Text(japanese ?? episode.title)
             .font(japanese == nil ? YoruTypography.display(32, italic: true) : .system(size: 25, weight: .medium, design: .serif))
             .lineLimit(2).minimumScaleFactor(0.75)
+            .help(japanese ?? episode.title)
             .task(id: style) {
                 guard style == .japanese else { return }
                 let title = await model.japaneseTitle(for: episode)
@@ -469,8 +542,8 @@ private struct PlaybackTitle: View {
 }
 
 extension Notification.Name {
-    static let yoruSubtitleOptions = Notification.Name("io.github.taoeffects.yoru.subtitleOptions")
-    static let yoruPlaybackActivity = Notification.Name("io.github.taoeffects.yoru.playbackActivity")
+    static let yoruSubtitleOptions = Notification.Name("local.yoru.subtitleOptions")
+    static let yoruPlaybackActivity = Notification.Name("local.yoru.playbackActivity")
 }
 
 struct SubtitleOptionsAnchor: NSViewRepresentable {

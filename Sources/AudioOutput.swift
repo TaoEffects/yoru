@@ -14,6 +14,7 @@ struct AudioOutputControl: View {
     @Environment(\.yoruTheme) private var theme
     @Environment(\.directionalLayer) private var layer
     var iconOnly = false
+    var compact = false
 
     private var current: String {
         outputLabel(player.audioOutputs.first { $0.id == player.configuredAudioOutput } ?? .system)
@@ -30,10 +31,10 @@ struct AudioOutputControl: View {
                 }
             }
         }
-        .buttonStyle(ControlStyle(selected: showingChoices, horizontalPadding: iconOnly ? 11 : 15))
+        .buttonStyle(ControlStyle(selected: showingChoices, horizontalPadding: iconOnly ? 11 : 15, compact: compact))
+        .help(iconOnly ? labels("Sortie audio") : current)
         .accessibilityLabel(labels("Sortie audio"))
         .accessibilityValue(current)
-        .help(labels("Sortie audio"))
         .popover(isPresented: $showingChoices, arrowEdge: .top) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 9) {

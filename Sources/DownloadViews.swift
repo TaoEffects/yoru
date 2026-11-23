@@ -6,10 +6,13 @@ struct DownloadView: View {
     @Environment(\.yoruLabels) private var labels
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("lightweight") private var lightweight = false
+    @AppStorage("animatePlaybackButtons") private var animateButtons = true
     @ObservedObject var model: Model
     var inPlayer = false
     @State private var showFilters = false
     @State private var expandedVersions: Set<EpisodeGroup> = []
+    @State private var expandedPacks: Set<TorrentSeasonGroup.Key> = []
+    @State private var expandedEpisodes: Set<TorrentSeasonGroup.Key> = []
 
     private struct EpisodeGroup: Hashable, Comparable {
         let title: String
@@ -26,17 +29,23 @@ struct DownloadView: View {
             header.padding(inPlayer ? 12 : 22)
             Divider()
             if let entry = model.inspected {
-                inspector(entry)
+                inspector(entry).transition(panelTransition)
             } else if model.downloadPane == .search {
-                search
+                search.transition(panelTransition)
             } else {
-                transfers
+                transfers.transition(panelTransition)
             }
         }
         .foregroundStyle(theme.primary)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(.bottom, miniPlaybackClearance)
+        .animation(animateButtons && !reduceMotion && !lightweight ? YoruMotion.pageChange : nil, value: model.inspected?.id)
+        .animation(animateButtons && !reduceMotion && !lightweight ? YoruMotion.pageChange : nil, value: model.downloadPane)
         .task { await model.checkTransfers(force: true) }
+    }
+
+    private var panelTransition: AnyTransition {
+        animateButtons && !reduceMotion && !lightweight ? YoruMotion.page : .identity
     }
 
     private var header: some View {
@@ -78,7 +87,7 @@ struct DownloadView: View {
                         if inPlayer { Image(systemName: "magnifyingglass") }
                         else { Label(labels("Rechercher"), systemImage: "magnifyingglass") }
                     }.buttonStyle(ControlStyle(accent: true))
-                        .disabled(model.searching || model.search.trimmed.isEmpty)
+                        .disabled(model.searching || model.addingTorrent || model.search.trimmed.isEmpty)
                         .accessibilityLabel("Rechercher")
                 }
                 DirectionalDisclosure(expanded: $showFilters, title: labels("Filtres")) {
@@ -87,10 +96,13 @@ struct DownloadView: View {
                         VStack(alignment: .leading, spacing: 8) { scope; numbers }
                     }.padding(.top, 7)
                 }.onAppear { showFilters = model.packs != nil || !model.seasonNumber.isEmpty || !model.episodeNumber.isEmpty }
-            }.padding(inPlayer ? 12 : 22)
+            }
+            .padding(.horizontal, inPlayer ? 12 : 22)
+            .padding(.top, inPlayer ? 9 : 14)
+            .padding(.bottom, inPlayer ? 6 : 9)
             Divider()
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 9) {
+                LazyVStack(alignment: .leading, spacing: 14) {
                     if model.searching {
                         ProgressView("Recherche sur Nyaa…").controlSize(.small).padding(.top, 8)
                     } else if model.torrentResults.isEmpty && model.downloadMessage.isEmpty {
@@ -99,26 +111,82 @@ struct DownloadView: View {
                     }
                     if !model.downloadMessage.isEmpty { status(model.downloadMessage) }
                     if !model.torrentResults.isEmpty {
-                        let packs = model.torrentResults.filter(\.isPack).sorted {
-                            ($0.seasons.min() ?? Int.max) < ($1.seasons.min() ?? Int.max)
-                        }
+                        let groups = TorrentSeasonGroup.group(model.torrentResults, preferred: model.requestedSeasons)
                         let others = model.torrentResults.filter { !$0.isPack && $0.episode == nil }
-                        episodeResults
-                        results("Packs de saison", rows: packs)
+                        ForEach(groups) { group in seasonResults(group) }
                         results("Autres vidéos", rows: others)
                     }
                 }.padding(inPlayer ? 10 : 22)
             }
+            .id(model.searchGeneration)
+            .mask(alignment: .top) {
+                VStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 10)
+                    Color.black
+                }
+            }
+            .onChange(of: model.searchGeneration) { _ in
+                expandedVersions.removeAll()
+                expandedPacks.removeAll()
+                expandedEpisodes.removeAll()
+            }
         }
     }
 
-    @ViewBuilder private var episodeResults: some View {
-        let entries = model.torrentResults.compactMap { row in
-            row.episode.map { (EpisodeGroup(title: SeasonNumber.base(row.artworkTitle).normalized, season: row.season, episode: $0), row) }
+    private func seasonResults(_ group: TorrentSeasonGroup) -> some View {
+        let seasons = group.id.seasons
+        let label = seasons.isEmpty ? "Saison non précisée" : seasons.count == 1 ? "Saison \(seasons[0])"
+            : "Saisons " + seasons.map(String.init).joined(separator: ", ")
+        let title = Text(group.title).font(YoruTypography.display(inPlayer ? 23 : 28)).lineLimit(2)
+        let season = Text(labels(label)).font(YoruTypography.text(15, strong: true)).foregroundStyle(theme.accent)
+        let headingLayout = inPlayer ? AnyLayout(VStackLayout(alignment: .leading, spacing: 3))
+            : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 10))
+        return VStack(alignment: .leading, spacing: 9) {
+            headingLayout {
+                title.accessibilityAddTraits(.isHeader).help(group.title)
+                season.lineLimit(2).layoutPriority(1).help(labels(label))
+            }.padding(.horizontal, 5)
+            if let pack = group.packs.first {
+                resultRow(pack, heading: labels("Pack de saison"), details: "")
+                if group.packs.count > 1 {
+                    DirectionalDisclosure(expanded: expansion($expandedPacks, id: group.id),
+                                          title: labels("Autres versions · \(group.packs.count - 1)")) {
+                        ForEach(Array(group.packs.dropFirst())) { row in
+                            resultRow(row, heading: row.group.nonEmpty ?? row.artworkTitle, details: row.scopeLabel)
+                        }
+                    }.padding(.horizontal, 5)
+                }
+            }
+            if !group.episodes.isEmpty {
+                let first = group.packs.isEmpty ? group.episodes.compactMap(\.episode).min() : nil
+                if let first { episodeResults(group.episodes.filter { $0.episode == first }) }
+                let remaining = group.episodes.filter { $0.episode != first }
+                if !remaining.isEmpty {
+                    DirectionalDisclosure(expanded: expansion($expandedEpisodes, id: group.id),
+                                          title: labels("\(first == nil ? "Épisodes disponibles" : "Autres épisodes") · \(Set(remaining.compactMap(\.episode)).count)")) {
+                        episodeResults(remaining)
+                    }.padding(.horizontal, 5)
+                }
+            }
+        }.padding(inPlayer ? 8 : 15)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(theme.card, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private func expansion(_ values: Binding<Set<TorrentSeasonGroup.Key>>, id: TorrentSeasonGroup.Key) -> Binding<Bool> {
+        Binding(get: { values.wrappedValue.contains(id) }, set: { expanded in
+            if expanded { values.wrappedValue.insert(id) }
+            else { values.wrappedValue.remove(id) }
+        })
+    }
+
+    @ViewBuilder private func episodeResults(_ items: [TorrentResult]) -> some View {
+        let entries = items.compactMap { row in
+            row.episode.map { (EpisodeGroup(title: row.seasonTitle.normalized, season: row.season, episode: $0), row) }
         }
         let groups = Dictionary(grouping: entries, by: { $0.0 })
         if !groups.isEmpty {
-            section("Épisodes", count: groups.count)
             ForEach(groups.keys.sorted(), id: \.self) { group in
                 let rows = (groups[group] ?? []).map { $0.1 }
                 if let first = rows.first {
@@ -173,23 +241,55 @@ struct DownloadView: View {
     }
 
     private func resultRow(_ row: TorrentResult, heading: String, details: String, episode: Bool = false) -> some View {
-        Button { model.inspect(row) } label: {
-            HStack(spacing: 10) {
-                if !inPlayer { AnimeCover(title: row.artworkTitle, width: 40, height: 56) }
+        Group {
+            if inPlayer {
+                VStack(alignment: .leading, spacing: 8) {
+                    resultDetails(row, heading: heading, details: details, episode: episode)
+                    resultActions(row)
+                }
+            } else {
+                HStack(spacing: 10) {
+                    resultDetails(row, heading: heading, details: details, episode: episode)
+                    resultActions(row)
+                }
+            }
+        }.padding(inPlayer ? 9 : 11).modifier(HoverCard()).help(row.title)
+    }
+
+    private func resultDetails(_ row: TorrentResult, heading: String, details: String, episode: Bool) -> some View {
+        HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(heading.nonEmpty ?? row.title).font(YoruTypography.display(inPlayer ? 19 : 23)).lineLimit(2)
-                    let subtitle = episode ? [row.artworkTitle, row.season.map { labels("Saison \($0)") } ?? ""] : [labels(details)]
-                    Text((subtitle + [row.group, row.french ? "FR" : ""]).filter { !$0.isEmpty }.joined(separator: " · "))
+                    let subtitle = episode ? [] : [labels(details)]
+                    let audio = row.french ? "FR" : row.title.match(#"(?i)\bdual[-. _]audio\b"#) != nil ? labels("Double audio") : ""
+                    Text((subtitle + [row.group, audio]).filter { !$0.isEmpty }.joined(separator: " · "))
                         .font(YoruTypography.text(15)).foregroundStyle(theme.mutedText).lineLimit(2)
-                }.frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(minWidth: inPlayer ? 96 : 142, maxWidth: .infinity, alignment: .leading)
                 VStack(alignment: .trailing, spacing: 4) {
                     Text(row.size).font(YoruTypography.text(15, strong: true))
                     Text("\(row.seeds) seeders").font(YoruTypography.text(13)).foregroundStyle(theme.mutedText)
                 }.monospacedDigit()
-                Image(systemName: "chevron.right").font(.system(size: 13)).foregroundStyle(theme.mutedText)
-            }.padding(inPlayer ? 9 : 11).contentShape(Rectangle())
-        }.buttonStyle(DirectionalPlainStyle()).modifier(HoverCard()).help(row.title)
-            .disabled(model.addingTorrent)
+        }
+    }
+
+    private func resultActions(_ row: TorrentResult) -> some View {
+        let busy = model.directDownloadID == row.id
+        let queued = model.queuedSearchDownloads.contains(row.id) || model.activeTransfers.contains { $0.id == row.id }
+        return HStack(spacing: 6) {
+            Button {
+                if queued { model.selectDownloadPane(.transfers) }
+                else { model.downloadSearchResult(row) }
+            } label: {
+                if queued { Label(labels("Transferts"), systemImage: "checkmark") }
+                else { DownloadLabel(title: labels(busy ? "Ajout…" : "Télécharger"), busy: busy) }
+            }.buttonStyle(ControlStyle(accent: !queued, horizontalPadding: 11))
+                .disabled(model.addingTorrent)
+                .help(labels(queued ? "Voir dans les transferts" : "Télécharger"))
+                .animation(animateButtons && !reduceMotion && !lightweight ? YoruMotion.pageChange : nil, value: queued)
+            Button { model.inspect(row) } label: { Image(systemName: "list.bullet") }
+                .buttonStyle(ControlStyle(horizontalPadding: 10))
+                .disabled(model.addingTorrent).accessibilityLabel(labels("Voir les fichiers")).help(labels("Voir les fichiers"))
+        }.fixedSize()
     }
 
     private var transfers: some View {
@@ -283,6 +383,7 @@ struct DownloadView: View {
             Text(entry.artworkTitle.nonEmpty ?? entry.title)
                 .font(YoruTypography.display(inPlayer ? 30 : 39))
                 .lineLimit(2).accessibilityAddTraits(.isHeader)
+                .help(entry.title)
             if !entry.torrent.isFileURL {
                 Text(entry.scopeLabel + " · " + entry.group).font(.system(size: 13)).foregroundStyle(theme.mutedText)
             }

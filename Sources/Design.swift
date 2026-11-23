@@ -2,7 +2,7 @@ import SwiftUI
 import CoreText
 
 enum InterfaceDefaults {
-    static let theme = YoruTheme.creme
+    static let theme = YoruTheme.framboise
     static let lowercase = false
     static let inlinePlayerNavigation = false
 }
@@ -32,6 +32,7 @@ struct InterfaceLabels {
     var lowercase = false
 
     func callAsFunction(_ label: String) -> String {
+        let label = L.tr(label)
         guard lowercase, let first = label.first, first.isUppercase,
               label.dropFirst().first?.isUppercase != true else { return label }
         return first.lowercased() + label.dropFirst()
@@ -85,7 +86,32 @@ enum YoruMotion {
     static let reveal = Animation.spring(response: 0.38, dampingFraction: 0.88, blendDuration: 0.15)
     static let focus = Animation.spring(response: 0.29, dampingFraction: 0.80, blendDuration: 0.10)
     static let pageChange = Animation.easeInOut(duration: 0.23)
-    static var page: AnyTransition { .opacity.combined(with: .offset(y: 7)) }
+    static let press = Animation.easeOut(duration: 0.10)
+    static var page: AnyTransition { .opacity.combined(with: .offset(x: -14)) }
+    static var panel: AnyTransition { .move(edge: .trailing).combined(with: .opacity) }
+    static var playbackNotice: AnyTransition { .opacity.combined(with: .scale(scale: 0.94, anchor: .trailing)) }
+}
+
+struct GlassButtonMotion: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var enabled
+    @AppStorage("lightweight") private var lightweight = false
+    @AppStorage("animatePlaybackButtons") private var animateButtons = true
+    var pressed: Bool
+    var radius: CGFloat
+
+    func body(content: Content) -> some View {
+        let animates = animateButtons && !reduceMotion && !lightweight && enabled
+        let active = pressed && animates
+        content
+            .overlay {
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(.white.opacity(active ? 0.32 : 0), lineWidth: 1.5)
+                    .allowsHitTesting(false).accessibilityHidden(true)
+            }
+            .scaleEffect(active ? 0.972 : 1)
+            .animation(animates ? (active ? YoruMotion.press : YoruMotion.selection) : nil, value: active)
+    }
 }
 
 struct SearchField: View {

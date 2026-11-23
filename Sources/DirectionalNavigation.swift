@@ -302,13 +302,17 @@ private struct DirectionalTarget: ViewModifier {
     @Environment(\.isEnabled) private var enabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("lightweight") private var lightweight = false
+    @AppStorage("animatePlaybackButtons") private var animateButtons = true
     @State private var focused = false
+    @State private var keyPressed = false
+    @State private var pressCount = 0
     let radius: CGFloat
     let priority: Int
     let action: () -> Void
     var adjust: ((NavigationDirection) -> Bool)? = nil
     var onBlur: (() -> Void)? = nil
     var onFocus: (() -> Void)? = nil
+    var animatesButton = false
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
@@ -327,11 +331,23 @@ private struct DirectionalTarget: ViewModifier {
                         .accessibilityHidden(true)
                 }
             }
-            .animation(reduceMotion || lightweight ? nil : YoruMotion.focus, value: focused)
+            .animation(animateButtons && !reduceMotion && !lightweight ? YoruMotion.focus : nil, value: focused)
+            .modifier(GlassButtonMotion(pressed: keyPressed, radius: radius))
+            .task(id: pressCount) {
+                guard keyPressed else { return }
+                try? await Task.sleep(nanoseconds: 85_000_000)
+                if !Task.isCancelled { keyPressed = false }
+            }
             .background {
                 if let navigator {
                     FocusRegistration(navigator: navigator, enabled: enabled, priority: priority, layer: layer,
-                                      action: action, highlight: {
+                                      action: {
+                                          if animatesButton && animateButtons && !reduceMotion && !lightweight {
+                                              keyPressed = true
+                                              pressCount += 1
+                                          }
+                                          action()
+                                      }, highlight: {
                                           focused = $0
                                           if $0 { onFocus?() } else { onBlur?() }
                                       }, adjust: adjust, back: back)
@@ -341,8 +357,8 @@ private struct DirectionalTarget: ViewModifier {
 }
 
 extension View {
-    func directionalTarget(radius: CGFloat = 14, priority: Int = 0, action: @escaping () -> Void) -> some View {
-        modifier(DirectionalTarget(radius: radius, priority: priority, action: action))
+    func directionalTarget(radius: CGFloat = 14, priority: Int = 0, animatesButton: Bool = false, action: @escaping () -> Void) -> some View {
+        modifier(DirectionalTarget(radius: radius, priority: priority, action: action, animatesButton: animatesButton))
     }
 
     func directionalValue(_ adjust: @escaping (CGFloat) -> Void) -> some View {
@@ -379,8 +395,18 @@ struct DirectionalPlainStyle: PrimitiveButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         Button(configuration)
-            .buttonStyle(.plain)
-            .modifier(DirectionalTarget(radius: radius, priority: priority, action: configuration.trigger, onFocus: onFocus))
+            .buttonStyle(GlassPlainButtonStyle(radius: radius))
+            .modifier(DirectionalTarget(radius: radius, priority: priority, action: configuration.trigger, onFocus: onFocus, animatesButton: true))
+    }
+}
+
+private struct GlassPlainButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+    let radius: CGFloat
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.opacity(enabled ? 1 : 0.47)
+            .modifier(GlassButtonMotion(pressed: configuration.isPressed, radius: radius))
     }
 }
 
@@ -514,11 +540,15 @@ struct DirectionalMenu<Title: View, Actions: View>: View {
 }
 
 struct DirectionalDisclosure<Content: View>: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage("lightweight") private var lightweight = false
+    @AppStorage("animatePlaybackButtons") private var animateButtons = true
     @Binding var expanded: Bool
     let title: String
     @ViewBuilder let content: Content
 
     var body: some View {
+        let motion = animateButtons && !reduceMotion && !lightweight
         VStack(alignment: .leading, spacing: 8) {
             Button { expanded.toggle() } label: {
                 HStack {
@@ -532,8 +562,9 @@ struct DirectionalDisclosure<Content: View>: View {
             }
             .buttonStyle(DirectionalPlainStyle(radius: 10))
             .accessibilityValue(expanded ? "Déployé" : "Replié")
-            if expanded { content }
+            if expanded { content.transition(motion ? YoruMotion.page : .identity) }
         }
+        .animation(motion ? YoruMotion.pageChange : nil, value: expanded)
     }
 }
 

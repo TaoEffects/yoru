@@ -4,7 +4,7 @@ Un lecteur vidéo et une bibliothèque d’animés pour macOS. Yoru lit notammen
 
 ## Télécharger
 
-Ouvre **Yoru-macOS-universal.dmg**, puis glisse **Yoru Public** dans le dossier **Applications** de la fenêtre. Le même téléchargement contient les versions Intel et Apple Silicon pour macOS Ventura (13) et versions ultérieures. [Télécharger Yoru](https://github.com/TaoEffects/yoru/releases/latest)
+Ouvre **Yoru-1.3.0-macOS-universal.dmg**, puis glisse **Yoru Public** dans le dossier **Applications** de la fenêtre. Le même téléchargement contient les versions Intel et Apple Silicon pour macOS Ventura (13) et versions ultérieures. [Télécharger Yoru](https://github.com/TaoEffects/yoru/releases/latest)
 
 Le lecteur vidéo et le moteur BitTorrent sont inclus. Cette édition est signée localement et n’est pas notariée par Apple. Selon la version de macOS, l’ouverture peut demander une autorisation dans Réglages Système. [Aide macOS sur l’ouverture d’une app téléchargée](https://support.apple.com/fr-fr/guide/mac-help/mh40616/mac)
 
@@ -33,6 +33,7 @@ Au premier lancement, choisis **Lecteur** pour ouvrir directement des vidéos, *
 2. Pour voir tes séries, ouvre **Bibliothèque** et choisis le dossier qui contient tes vidéos.
 3. Pour télécharger, ouvre un fichier `.torrent`, cherche un titre ou lance le téléchargement depuis une recommandation. Yoru peut choisir un pack complet ou les épisodes disponibles d’une série en cours parmi les sources activées. Tu peux aussi choisir une version à la main. Les vidéos terminées apparaissent dans la bibliothèque et le torrent sort de la liste des transferts.
 
+- Maintiens **Espace** ou le centre de l’image pour passer temporairement en **×2** ; relâche pour retrouver la vitesse précédente.
 - **Espace** met en pause et **F** bascule en plein écran. La barre de navigation flotte au-dessus de la vidéo et se révèle dans la moitié supérieure en plein écran. Fais défiler la barre à la molette ou au trackpad pour changer d’onglet.
 - Par défaut, en lecture, **← / →** reculent ou avancent de cinq secondes et **↑ / ↓** règlent le volume. En pause, les flèches déplacent le focus et **Entrée** valide. Les manettes compatibles macOS utilisent le pavé directionnel, **A** pour valider et **B** pour revenir.
 - Le bouton **Image dans l’image** se trouve près des sous-titres. En changeant d’onglet, tu peux garder les commandes dans une bulle, ouvrir la vidéo flottante ou masquer le mini-lecteur.
@@ -41,7 +42,7 @@ Au premier lancement, choisis **Lecteur** pour ouvrir directement des vidéos, *
 - Dans une saison, glisse sur les vignettes ou utilise **Maj + clic** pour changer le statut de plusieurs épisodes en une fois.
 - La fiche d’une série reprend le dernier épisode entamé dans la saison choisie. **Corbeille** déplace les vidéos sélectionnées après confirmation.
 
-L’interface est en français. Le Liquid Glass natif est disponible à partir de macOS 26. Les vignettes vidéo utilisent FFmpeg s’il est installé. Les recherches de sous-titres en ligne utilisent tes propres accès Jimaku ou OpenSubtitles, configurables dans les réglages.
+L’interface propose le français, l’anglais, le japonais, l’espagnol et le coréen. La langue suit le système et se change dans l’écran de bienvenue ou dans **Réglages → Apparence**. Cette première traduction est automatique, avec une correction des principaux termes de navigation ; les retours de locuteurs natifs sont bienvenus. Les titres et synopsis du catalogue conservent leur langue de source. Le Liquid Glass natif est disponible à partir de macOS 26. Les vignettes vidéo utilisent FFmpeg s’il est installé. Les recherches de sous-titres en ligne utilisent tes propres accès Jimaku ou OpenSubtitles, configurables dans les réglages.
 
 ## Personnaliser
 
