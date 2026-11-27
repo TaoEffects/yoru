@@ -8,6 +8,21 @@ Ouvre **Yoru-1.3.0-macOS-universal.dmg**, puis glisse **Yoru Public** dans le do
 
 Le lecteur vidéo et le moteur BitTorrent sont inclus. Cette édition est signée localement et n’est pas notariée par Apple. Selon la version de macOS, l’ouverture peut demander une autorisation dans Réglages Système. [Aide macOS sur l’ouverture d’une app téléchargée](https://support.apple.com/fr-fr/guide/mac-help/mh40616/mac)
 
+## Version Nintendo Switch 2 (homebrew hors ligne)
+
+Une version expérimentale pour **Nintendo Switch 2** (`libounce` / `kaiHEN`, format `.nro`) est également disponible dans les Releases ([télécharger Yoru Switch 2 v0.5.1](https://github.com/TaoEffects/yoru/releases/tag/switch2-v0.5.1)) : copier le dossier `switch/yoru/` de l’archive sur la carte SD et lancer `Yoru.nro` depuis `hbmenu`.
+
+**Ce qui est inclus sur Switch 2 :**
+- Interface reconstruite depuis l’application Mac (accueil avec reprise, bibliothèque, lecteur, réglages) et les **7 thèmes** du Mac (Framboise par défaut).
+- Affichage **120 Hz + VRR**, défilement inertiel, matériaux translucides **Liquid Glass** en OpenGL ES (flou Kawase hors écran) et animations temporelles.
+- Lecture locale hors ligne depuis la carte SD (`sdmc:/` complet ou dossier choisi, hors dossiers système) avec décodage vidéo, **aperçu vidéo PiP en direct** au-dessus du mini-lecteur, sous-titres stylés `.ass`, cycle sur toutes les pistes FR/JP/EN (avec priorité aux dialogues complets sur les pistes OP/ED), saut des chapitres OP/ED et maintien ×2.
+- Navigation manette **et** tactile (boutons, recherche, sélection de dossier, bouton quitter vers `hbmenu`).
+
+**Ce qui n’est pas inclus sur Switch 2 (spécifique à macOS) :**
+- **Aucun moteur BitTorrent**, aucun téléchargement ni serveur réseau/WebDAV/Jellyfin/IPTV (`YORU_OFFLINE`).
+- **Aucune récupération en ligne** : pas d’AniList, AniZip, AniSkip, Nautiljon, Jimaku ni OpenSubtitles (les affiches facultatives se placent localement près des vidéos ou dans `switch/yoru/config/artwork/`).
+- Pas encore de build Android dans ce dépôt.
+
 ## Aperçu
 
 ![Accueil de Yoru avec reprise de lecture, affiches et mini-lecteur](docs/screenshots/01-accueil.jpg)
